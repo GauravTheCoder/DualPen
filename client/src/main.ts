@@ -736,9 +736,21 @@ function setUpMonaco(): void {
 // queued unmodified arrow keypress finally moves the cursor by one
 // character, which reads as a "snap back". This binds Ctrl+Left/Right (and
 // Ctrl+Shift+Left/Right for extending the selection) directly to the plain
-// word commands, bypassing Monaco's self-disabling default entirely so the
-// keys work regardless of accessibility mode or OS.
+// word commands, bypassing Monaco's self-disabling default.
+//
+// Windows only, for two reasons. The `isWindows` half of that kbExpr means
+// the default never disables itself anywhere else, so there is nothing to
+// work around on macOS or Linux - Monaco's own binding is live and correct.
+// And monaco.KeyMod.CtrlCmd is Command, not Control, on macOS (see
+// keybindings.js: `metaKey = OS === Macintosh ? ctrlCmd : winCtrl`), so
+// binding it unconditionally stole Cmd+Left/Right - line start/end on a Mac -
+// and made it move by word instead, while Option+Left/Right kept working via
+// the untouched default. Monaco spells the platform split with a `mac:`
+// override on its own registration; here the whole workaround simply doesn't
+// apply off Windows.
 function bindCtrlArrowWordNavigation(editor: monaco.editor.IStandaloneCodeEditor): void {
+  if (!isWindows()) return;
+
   const bind = (keybinding: number, commandId: string) => {
     editor.addCommand(keybinding, () => {
       editor.trigger("wordNavigation", commandId, null);
@@ -755,6 +767,16 @@ function bindCtrlArrowWordNavigation(editor: monaco.editor.IStandaloneCodeEditor
     monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.RightArrow,
     "cursorWordStartRightSelect",
   );
+}
+
+// navigator.userAgentData is Chromium-only, so fall back to userAgent, which
+// reports "Windows NT" on every Windows browser including Firefox and the
+// Windows builds Monaco's own IsWindowsContext keys off.
+function isWindows(): boolean {
+  const platform = (navigator as Navigator & { userAgentData?: { platform?: string } })
+    .userAgentData?.platform;
+  if (platform) return platform === "Windows";
+  return navigator.userAgent.includes("Windows");
 }
 
 // Monaco's onDidChangeCursorSelection event doesn't say which key caused the
