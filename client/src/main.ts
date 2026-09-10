@@ -674,11 +674,23 @@ function setUpMonaco(): void {
   if (!container) return;
 
   currentModel = monaco.editor.createModel("", "plaintext");
+  // The "off" side of the accessibility toggle is "auto", not "off". Monaco
+  // documents "off" as "Assume a screen reader is not attached", and maps it
+  // to AccessibilitySupport.Disabled - which makes it replace the
+  // screen-reader content's aria-label with "The editor is not accessible at
+  // this time." (see monaco-editor's screenReaderUtils.js). That turns the
+  // toggle's off position into a dead end for anyone using a screen reader
+  // who hasn't found the setting yet. "auto" is Monaco's own default and
+  // leaves the real aria-label in place. It won't enable the screen-reader
+  // optimized path on its own - no browser API reports screen-reader
+  // presence, so "auto" stays Unknown on the web and the toggle still has to
+  // be on for that - but off now means "not optimized" rather than "actively
+  // announced as broken".
   monacoEditor = monaco.editor.create(container, {
     model: currentModel,
     automaticLayout: true,
     readOnly: true,
-    accessibilitySupport: loadAccessibilitySupportPref() ? "on" : "off",
+    accessibilitySupport: loadAccessibilitySupportPref() ? "on" : "auto",
     fontFamily: loadFontFamily(),
     fontSize: loadFontSize(),
   });
@@ -779,7 +791,7 @@ function setUpSettings(): void {
   if (!settingsPanel) {
     settingsPanel = new SettingsPanel({
       onAccessibilitySupportChange: (on) => {
-        monacoEditor?.updateOptions({ accessibilitySupport: on ? "on" : "off" });
+        monacoEditor?.updateOptions({ accessibilitySupport: on ? "on" : "auto" });
       },
       onFontChange: (family, size) => {
         monacoEditor?.updateOptions({ fontFamily: family, fontSize: size });
