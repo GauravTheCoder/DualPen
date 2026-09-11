@@ -691,6 +691,13 @@ function setUpMonaco(): void {
     automaticLayout: true,
     readOnly: true,
     accessibilitySupport: loadAccessibilitySupportPref() ? "on" : "auto",
+    // Monaco fills its screen-reader textarea with a page of accessibilityPageSize
+    // lines (default 500), and VoiceOver reads that whole field rather than the
+    // line the cursor is on. A page of 1 makes the field hold only the current
+    // line, so "read the whole field" and "read the current line" coincide. The
+    // trade-off is that a screen reader can no longer review surrounding lines
+    // from the field - acceptable here, since the editor is line-oriented.
+    accessibilityPageSize: loadAccessibilitySupportPref() ? 1 : 500,
     fontFamily: loadFontFamily(),
     fontSize: loadFontSize(),
   });
@@ -813,7 +820,10 @@ function setUpSettings(): void {
   if (!settingsPanel) {
     settingsPanel = new SettingsPanel({
       onAccessibilitySupportChange: (on) => {
-        monacoEditor?.updateOptions({ accessibilitySupport: on ? "on" : "auto" });
+        monacoEditor?.updateOptions({
+          accessibilitySupport: on ? "on" : "auto",
+          accessibilityPageSize: on ? 1 : 500,
+        });
       },
       onFontChange: (family, size) => {
         monacoEditor?.updateOptions({ fontFamily: family, fontSize: size });
