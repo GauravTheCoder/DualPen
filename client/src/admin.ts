@@ -9,6 +9,7 @@ export class AdminPanel {
   private dialog: HTMLDialogElement;
   private users: api.CurrentUser[] = [];
   private editingId: number | null = null;
+  private busy = false;
 
   private getCurrentUserId: () => number | null;
 
@@ -22,15 +23,17 @@ export class AdminPanel {
       <p id="admin-status" role="status" class="admin-status"></p>
       <section class="settings-section" aria-labelledby="admin-users-heading">
         <h3 id="admin-users-heading">Users</h3>
+        <div class="admin-table-wrap" tabindex="0" role="region" aria-labelledby="admin-users-heading">
         <table class="admin-table">
           <thead><tr><th>Username</th><th>Display name</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody id="admin-users-body"></tbody>
         </table>
+        </div>
       </section>
-      <form id="admin-edit-form" class="settings-section admin-form" aria-labelledby="admin-edit-heading" hidden>
+      <form id="admin-edit-form" novalidate class="settings-section admin-form" aria-labelledby="admin-edit-heading" hidden>
         <h3 id="admin-edit-heading" tabindex="-1">Edit user</h3>
-        <label>Display name <input type="text" id="admin-edit-display" required /></label>
-        <label>New password (leave blank to keep) <input type="password" id="admin-edit-password" autocomplete="new-password" /></label>
+        <label>Display name <input type="text" id="admin-edit-display" required maxlength="100" aria-describedby="admin-status" /></label>
+        <label>New password (leave blank to keep) <input type="password" id="admin-edit-password" minlength="8" maxlength="256" aria-describedby="admin-status" autocomplete="new-password" /></label>
         <label class="settings-checkbox-row"><input type="checkbox" id="admin-edit-admin" /> Administrator</label>
         <label class="settings-checkbox-row"><input type="checkbox" id="admin-edit-active" /> Active (can sign in)</label>
         <div class="admin-form-buttons">
@@ -38,11 +41,11 @@ export class AdminPanel {
           <button type="button" id="admin-edit-cancel">Cancel</button>
         </div>
       </form>
-      <form id="admin-create-form" class="settings-section admin-form" aria-labelledby="admin-create-heading">
+      <form id="admin-create-form" novalidate class="settings-section admin-form" aria-labelledby="admin-create-heading">
         <h3 id="admin-create-heading">Create user</h3>
-        <label>Username <input type="text" id="admin-create-username" required autocomplete="off" /></label>
-        <label>Display name <input type="text" id="admin-create-display" required autocomplete="off" /></label>
-        <label>Initial password <input type="password" id="admin-create-password" required autocomplete="new-password" /></label>
+        <label>Username <input type="text" id="admin-create-username" required maxlength="64" aria-describedby="admin-status" autocomplete="off" /></label>
+        <label>Display name <input type="text" id="admin-create-display" required maxlength="100" aria-describedby="admin-status" autocomplete="off" /></label>
+        <label>Initial password <input type="password" id="admin-create-password" required minlength="8" maxlength="256" aria-describedby="admin-status" autocomplete="new-password" /></label>
         <div class="admin-form-buttons"><button type="submit">Create user</button></div>
       </form>
       <div class="settings-buttons">
@@ -61,6 +64,9 @@ export class AdminPanel {
       e.preventDefault();
       void this.saveEdit();
     });
+    this.dialog.addEventListener("input", (e) => {
+      (e.target as HTMLElement).removeAttribute("aria-invalid");
+    });
     this.q("#admin-users-body").addEventListener("click", (e) => {
       const btn = (e.target as HTMLElement).closest<HTMLButtonElement>("button[data-user-id]");
       if (btn) this.openEditor(Number(btn.dataset.userId));
@@ -78,6 +84,17 @@ export class AdminPanel {
     window.setTimeout(() => (el.textContent = msg), 50);
   }
 
+  /** Report a validation error and keep focus on the offending field. */
+  private invalid(field: HTMLInputElement, msg: string): void {
+    field.setAttribute("aria-invalid", "true");
+    this.setStatus(msg);
+    field.focus();
+  }
+
+  private setBusy(form: string, busy: boolean): void {
+    this.q<HTMLButtonElement>(`${form} button[type="submit"]`).disabled = busy;
+  }
+
   async open(): Promise<void> {
     if (!this.dialog.open) this.dialog.showModal();
     this.closeEditor();
@@ -88,6 +105,8 @@ export class AdminPanel {
     try {
       this.users = await api.adminListUsers();
     } catch (e) {
+      this.users = [];
+      this.renderRows();
       this.setStatus(`Could not load users: ${(e as Error).message}`);
       return;
     }
@@ -157,18 +176,29 @@ export class AdminPanel {
     const username = this.q<HTMLInputElement>("#admin-create-username");
     const display = this.q<HTMLInputElement>("#admin-create-display");
     const password = this.q<HTMLInputElement>("#admin-create-password");
+    if (this.busy) return;
+    const uname = username.value.trim();
+    const dname = display.value.trim();
+    if (!uname) return this.invalid(username, "Username is required.");
+    if (uname.length > 64) return this.invalid(username, "Username must be 64 characters or fewer.");
+    if (!dname) return this.invalid(display, "Display name is required.");
+    if (dname.length > 100) return this.invalid(display, "Display name must be 100 characters or fewer.");
+    if (password.value.trim().length < 8) {
+      return this.invalid(password, "Password must be at least 8 characters.");
+    }
+    this.busy = true;
+    this.setBusy("#admin-create-form", true);
     try {
-      const u = await api.adminCreateUser(
-        username.value.trim(),
-        display.value.trim(),
-        password.value,
-      );
+      const u = await api.adminCreateUser(uname, dname, password.value);
       username.value = display.value = password.value = "";
       await this.refresh();
       this.setStatus(`Created user ${u.username}.`);
       username.focus();
     } catch (e) {
       this.setStatus(`Could not create user: ${(e as Error).message}`);
+    } finally {
+      this.busy = false;
+      this.setBusy("#admin-create-form", false);
     }
   }
 
@@ -177,8 +207,16 @@ export class AdminPanel {
     const orig = this.users.find((x) => x.id === id);
     if (id === null || !orig) return;
     const changes: Parameters<typeof api.adminUpdateUser>[1] = {};
-    const display = this.q<HTMLInputElement>("#admin-edit-display").value.trim();
-    const password = this.q<HTMLInputElement>("#admin-edit-password").value;
+    if (this.busy) return;
+    const displayEl = this.q<HTMLInputElement>("#admin-edit-display");
+    const passwordEl = this.q<HTMLInputElement>("#admin-edit-password");
+    const display = displayEl.value.trim();
+    const password = passwordEl.value;
+    if (!display) return this.invalid(displayEl, "Display name is required.");
+    if (display.length > 100) return this.invalid(displayEl, "Display name must be 100 characters or fewer.");
+    if (password && password.trim().length < 8) {
+      return this.invalid(passwordEl, "Password must be at least 8 characters.");
+    }
     const admin = this.q<HTMLInputElement>("#admin-edit-admin").checked;
     const active = this.q<HTMLInputElement>("#admin-edit-active").checked;
     if (display !== orig.display_name) changes.display_name = display;
@@ -189,13 +227,21 @@ export class AdminPanel {
       this.setStatus("No changes to save.");
       return;
     }
+    this.busy = true;
+    this.setBusy("#admin-edit-form", true);
     try {
       await api.adminUpdateUser(id, changes);
       this.closeEditor();
       await this.refresh();
+      this.dialog
+        .querySelector<HTMLButtonElement>(`button[data-user-id="${id}"]`)
+        ?.focus();
       this.setStatus(`Saved changes to ${orig.username}.`);
     } catch (e) {
       this.setStatus(`Could not save changes: ${(e as Error).message}`);
+    } finally {
+      this.busy = false;
+      this.setBusy("#admin-edit-form", false);
     }
   }
 }

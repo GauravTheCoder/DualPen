@@ -31,12 +31,20 @@ KIND_CHAT = b"c"  # full chat frame (type byte included)
 KIND_STATE_REQUEST = b"r"  # "send me your full doc state"
 KIND_STATE = b"s"  # reply to KIND_STATE_REQUEST: full doc state as an update
 
-PRESENCE_TTL_SECONDS = 60
-PRESENCE_REFRESH_SECONDS = 20.0
+PRESENCE_TTL_SECONDS = 15
+PRESENCE_REFRESH_SECONDS = 5.0
+PRESENCE_LIST_TIMEOUT_SECONDS = 1.0
+
+CONTROL_CHANNEL = "collab:control"
+PUBLISH_ATTEMPTS = 3
+RESYNC_DELAY_SECONDS = 0.5
 
 PID_LENGTH = 32
 
 Handler = Callable[[bytes, bytes], Awaitable[None]]
+ResyncHandler = Callable[[str], Awaitable[None]]
+# (user_id, doc_id) of a user who just opened doc_id on another process.
+ControlHandler = Callable[[int, str], Awaitable[None]]
 
 
 class Broadcaster:
@@ -55,6 +63,18 @@ class Broadcaster:
         pass
 
     async def publish(self, doc_id: str, kind: bytes, payload: bytes) -> None:
+        pass
+
+    def publish_nowait(self, doc_id: str, kind: bytes, payload: bytes) -> None:
+        pass
+
+    def set_resync_handler(self, handler: ResyncHandler) -> None:
+        pass
+
+    def set_control_handler(self, handler: ControlHandler) -> None:
+        pass
+
+    async def publish_user_opened(self, user_id: int, doc_id: str) -> None:
         pass
 
     async def set_presence(self, user_id: int, doc_id: str, display_name: str) -> None:
@@ -82,6 +102,20 @@ class RedisBroadcaster(Broadcaster):
         self._reader: asyncio.Task | None = None
         self._refresher: asyncio.Task | None = None
         self._local_presence: dict[int, tuple[str, str]] = {}
+        # Every publish goes through one ordered queue + worker so a burst of
+        # edits can't open unbounded concurrent Redis connections.
+        self._queue: asyncio.Queue[tuple[str, bytes]] = asyncio.Queue()
+        self._publisher: asyncio.Task | None = None
+        self._resyncer: asyncio.Task | None = None
+        self._needs_resync = False
+        self._resync_handler: ResyncHandler | None = None
+        self._control_handler: ControlHandler | None = None
+
+    def set_resync_handler(self, handler: ResyncHandler) -> None:
+        self._resync_handler = handler
+
+    def set_control_handler(self, handler: ControlHandler) -> None:
+        self._control_handler = handler
 
     @staticmethod
     def _channel(doc_id: str) -> str:
@@ -94,21 +128,23 @@ class RedisBroadcaster(Broadcaster):
         self._pubsub = self._redis.pubsub()
         # Stay subscribed to something at all times: redis-py's reader loop
         # idles instead of blocking when a PubSub has no subscriptions.
-        await self._pubsub.subscribe("collab:control")
+        await self._pubsub.subscribe(CONTROL_CHANNEL)
+        self._publisher = asyncio.ensure_future(self._publish_loop())
         self._reader = asyncio.ensure_future(self._read_loop())
         self._refresher = asyncio.ensure_future(self._refresh_presence_loop())
 
     async def stop(self) -> None:
-        for task in (self._reader, self._refresher):
+        tasks = (self._reader, self._refresher, self._publisher, self._resyncer)
+        for task in tasks:
             if task is not None:
                 task.cancel()
-        for task in (self._reader, self._refresher):
+        for task in tasks:
             if task is not None:
                 try:
                     await task
                 except (asyncio.CancelledError, Exception):
                     pass
-        self._reader = self._refresher = None
+        self._reader = self._refresher = self._publisher = self._resyncer = None
         if self._pubsub is not None:
             try:
                 await self._pubsub.aclose()
@@ -137,14 +173,58 @@ class RedisBroadcaster(Broadcaster):
             logger.exception("Redis unsubscribe failed for doc %s", doc_id)
 
     async def publish(self, doc_id: str, kind: bytes, payload: bytes) -> None:
-        envelope = self.process_id.encode("ascii") + kind + payload
-        try:
-            await self._redis.publish(self._channel(doc_id), envelope)
-        except Exception:
-            # Local editing must keep working if Redis hiccups.
-            logger.exception("Redis publish failed for doc %s", doc_id)
+        self.publish_nowait(doc_id, kind, payload)
+
+    def publish_nowait(self, doc_id: str, kind: bytes, payload: bytes) -> None:
+        self._queue.put_nowait((self._channel(doc_id), self.process_id.encode("ascii") + kind + payload))
+
+    async def publish_user_opened(self, user_id: int, doc_id: str) -> None:
+        body = json.dumps({"user_id": user_id, "doc_id": doc_id}).encode("utf-8")
+        self._queue.put_nowait((CONTROL_CHANNEL, self.process_id.encode("ascii") + b"o" + body))
+
+    async def _publish_loop(self) -> None:
+        while True:
+            batch = [await self._queue.get()]
+            while not self._queue.empty():
+                batch.append(self._queue.get_nowait())
+            attempts = 1 if self._needs_resync else PUBLISH_ATTEMPTS
+            for attempt in range(attempts):
+                try:
+                    pipe = self._redis.pipeline(transaction=False)
+                    for channel, envelope in batch:
+                        pipe.publish(channel, envelope)
+                    await pipe.execute()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    self._needs_resync = True
+                    if attempt + 1 < attempts:
+                        await asyncio.sleep(0.2 * (attempt + 1))
+                    else:
+                        # Local editing must keep working if Redis hiccups;
+                        # the resync after recovery reconciles what was lost.
+                        logger.exception("Redis publish failed; dropping %d message(s)", len(batch))
+                else:
+                    if self._needs_resync:
+                        self._schedule_resync()
+                    break
+
+    def _schedule_resync(self) -> None:
+        if self._resync_handler is None or (self._resyncer is not None and not self._resyncer.done()):
+            return
+        self._resyncer = asyncio.ensure_future(self._resync())
+
+    async def _resync(self) -> None:
+        await asyncio.sleep(RESYNC_DELAY_SECONDS)
+        self._needs_resync = False
+        for doc_id in list(self._handlers):
+            try:
+                await self._resync_handler(doc_id)
+            except Exception:
+                logger.exception("Resync failed for doc %s", doc_id)
 
     async def _read_loop(self) -> None:
+        failed = False
         while True:
             try:
                 message = await self._pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
@@ -152,8 +232,13 @@ class RedisBroadcaster(Broadcaster):
                 raise
             except Exception:
                 logger.exception("Redis pubsub read failed; retrying")
+                failed = True
+                self._needs_resync = True
                 await asyncio.sleep(1.0)
                 continue
+            if failed:
+                failed = False
+                self._schedule_resync()
             if message is None or message.get("type") != "message":
                 # get_message returns promptly with None on fakeredis/idle
                 # connections; yield so we never spin.
@@ -170,6 +255,9 @@ class RedisBroadcaster(Broadcaster):
             return
         if data[:PID_LENGTH].decode("ascii", "replace") == self.process_id:
             return
+        if channel == CONTROL_CHANNEL:
+            await self._dispatch_control(data[PID_LENGTH : PID_LENGTH + 1], data[PID_LENGTH + 1 :])
+            return
         doc_id = channel[len("collab:room:") :]
         handler = self._handlers.get(doc_id)
         if handler is None:
@@ -178,6 +266,15 @@ class RedisBroadcaster(Broadcaster):
             await handler(data[PID_LENGTH : PID_LENGTH + 1], data[PID_LENGTH + 1 :])
         except Exception:
             logger.exception("Error handling remote message for doc %s", doc_id)
+
+    async def _dispatch_control(self, kind: bytes, payload: bytes) -> None:
+        if kind != b"o" or self._control_handler is None:
+            return
+        try:
+            body = json.loads(payload)
+            await self._control_handler(int(body["user_id"]), str(body["doc_id"]))
+        except Exception:
+            logger.exception("Error handling control message")
 
     async def set_presence(self, user_id: int, doc_id: str, display_name: str) -> None:
         self._local_presence[user_id] = (doc_id, display_name)
@@ -205,7 +302,8 @@ class RedisBroadcaster(Broadcaster):
 
     async def list_presence(self) -> dict[int, tuple[str, str]]:
         result: dict[int, tuple[str, str]] = {}
-        try:
+
+        async def scan() -> None:
             async for key in self._redis.scan_iter(match="collab:presence:*"):
                 raw = await self._redis.get(key)
                 if raw is None:
@@ -214,6 +312,12 @@ class RedisBroadcaster(Broadcaster):
                 user_id = int(key_str.rsplit(":", 1)[1])
                 entry = json.loads(raw)
                 result[user_id] = (entry["doc_id"], entry["display_name"])
+
+        try:
+            # Degrade fast to local-only presence when Redis is unreachable.
+            await asyncio.wait_for(scan(), PRESENCE_LIST_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            logger.warning("Redis presence listing timed out")
         except Exception:
             logger.exception("Redis presence listing failed")
         return result
@@ -224,5 +328,19 @@ def create_broadcaster() -> Broadcaster:
     if not url:
         return InMemoryBroadcaster()
     import redis.asyncio as aioredis
+    from redis.asyncio.retry import Retry
+    from redis.backoff import ExponentialBackoff
+    from redis.exceptions import ConnectionError as RedisConnectionError
+    from redis.exceptions import TimeoutError as RedisTimeoutError
 
-    return RedisBroadcaster(aioredis.from_url(url))
+    # Retry + health checks so a stale pooled connection (e.g. after a Redis
+    # restart) is replaced transparently instead of failing the first command.
+    return RedisBroadcaster(
+        aioredis.from_url(
+            url,
+            health_check_interval=10,
+            socket_connect_timeout=2,
+            retry=Retry(ExponentialBackoff(cap=0.5, base=0.05), 3),
+            retry_on_error=[RedisConnectionError, RedisTimeoutError, ConnectionError, TimeoutError],
+        )
+    )

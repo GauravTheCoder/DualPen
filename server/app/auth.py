@@ -46,7 +46,13 @@ def set_session_cookie(response: Response, session: Session) -> None:
 
 
 def clear_session_cookie(response: Response) -> None:
-    response.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
+    response.delete_cookie(
+        key=SESSION_COOKIE_NAME,
+        path="/",
+        httponly=True,
+        secure=_cookie_secure(),
+        samesite="lax",
+    )
 
 
 async def get_user_for_session_token(db: AsyncSession, session_token: str | None) -> User | None:

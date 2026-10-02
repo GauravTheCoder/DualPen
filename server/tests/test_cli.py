@@ -65,3 +65,28 @@ def test_cli_noninteractive_rejects_empty_password(monkeypatch):
 def test_cli_noninteractive_rejects_missing_password(monkeypatch):
     with pytest.raises(SystemExit):
         _run_cli(monkeypatch, ["create-admin", "--username", "x"])
+
+
+@pytest.mark.parametrize("pw", ["   \n", "short\n"])
+def test_cli_rejects_blank_or_short_password(monkeypatch, pw):
+    with pytest.raises(SystemExit):
+        _run_cli(monkeypatch, ["create-admin", "--username", "x", "--password-stdin"], pw)
+
+
+def test_cli_rejects_whitespace_username(monkeypatch):
+    with pytest.raises(SystemExit):
+        _run_cli(monkeypatch, ["create-admin", "--username", "   ", "--password-stdin"], "longenough1\n")
+
+
+async def test_cli_blank_display_name_falls_back_to_username(monkeypatch):
+    import asyncio
+
+    await asyncio.to_thread(
+        _run_cli,
+        monkeypatch,
+        ["create-admin", "--username", "dnadmin", "--display-name", "   ", "--password-stdin"],
+        "longenough1\n",
+    )
+    async with AsyncSessionLocal() as db:
+        user = (await db.execute(select(User).where(User.username == "dnadmin"))).scalar_one()
+        assert user.display_name == "dnadmin"

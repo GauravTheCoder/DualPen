@@ -686,6 +686,7 @@ body:not(.a11y-support-on) .file-tree [role="treeitem"][aria-expanded="true"]::b
   width: min(720px, 92vw);
   max-height: 85vh;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .admin-dialog[open] {
@@ -703,9 +704,14 @@ body:not(.a11y-support-on) .file-tree [role="treeitem"][aria-expanded="true"]::b
 }
 
 .admin-status {
+  overflow-wrap: anywhere;
   margin: 0;
   padding: 0 20px;
   min-height: 1.4em;
+}
+
+.admin-table-wrap {
+  overflow-x: auto;
 }
 
 .admin-table {
@@ -718,6 +724,12 @@ body:not(.a11y-support-on) .file-tree [role="treeitem"][aria-expanded="true"]::b
   text-align: left;
   padding: 4px 8px;
   border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.admin-table td:last-child {
+  white-space: nowrap;
 }
 
 .admin-form label:not(.settings-checkbox-row) {

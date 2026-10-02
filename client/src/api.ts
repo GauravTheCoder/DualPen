@@ -44,7 +44,13 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
       } else if (Array.isArray(body.detail)) {
         // FastAPI/Pydantic 422 validation errors: detail is a list of
         // {msg, loc, ...}, not a plain string.
-        detail = body.detail.map((d: { msg?: string }) => d.msg ?? String(d)).join("; ");
+        detail = body.detail
+          .map((d: { msg?: string; loc?: unknown[] }) => {
+            const field = Array.isArray(d.loc) ? String(d.loc[d.loc.length - 1] ?? "") : "";
+            const msg = d.msg ?? String(d);
+            return field && field !== "body" ? `${field}: ${msg}` : msg;
+          })
+          .join("; ");
       }
     } catch {
       // ignore non-JSON error bodies

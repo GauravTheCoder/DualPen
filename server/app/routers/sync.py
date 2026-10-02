@@ -1,10 +1,11 @@
 import asyncio
+import hashlib
 import json
 import logging
 from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from pycrdt import Text, YMessageType, read_message
+from pycrdt import Doc, Text, YMessageType, read_message
 from pycrdt.websocket import WebsocketServer
 from pycrdt.websocket.yroom import YRoom
 
@@ -87,6 +88,8 @@ async def get_all_open_docs_by_user() -> dict[int, tuple[str, str]]:
 
 @asynccontextmanager
 async def sync_lifespan():
+    broadcaster.set_resync_handler(_resync_doc)
+    broadcaster.set_control_handler(_handle_user_opened_elsewhere)
     await broadcaster.start()
     try:
         async with websocket_server:
@@ -195,6 +198,32 @@ async def _send_to_local_clients(room: YRoom, message: bytes) -> None:
     await asyncio.gather(*(client.send(message) for client in room.clients), return_exceptions=True)
 
 
+async def _resync_doc(doc_id: str) -> None:
+    """After a Redis outage: hand peers our full state and ask for theirs, so
+    edits made while pub/sub was down reconcile in both directions."""
+    room = websocket_server.rooms.get(doc_id)
+    if room is None or doc_id not in _ready_doc_ids:
+        return
+    await broadcaster.publish(doc_id, pubsub.KIND_STATE, room.ydoc.get_update())
+    await broadcaster.publish(doc_id, pubsub.KIND_STATE_REQUEST, b"")
+
+
+async def _handle_user_opened_elsewhere(user_id: int, doc_id: str) -> None:
+    """Cross-process half of one-doc-per-user: another process says this user
+    just opened doc_id, so close our older connection if it's a different doc."""
+    prior = _user_open_doc.get(user_id)
+    if prior is not None and prior[0] != doc_id:
+        try:
+            await prior[2].close(code=CLOSE_REPLACED_BY_NEWER_SESSION)
+        except Exception:
+            logger.warning("Failed to force-close connection for user %s replaced on another process", user_id)
+
+
+def _seed_client_id(doc_id: str, content: str) -> int:
+    digest = hashlib.sha256(f"{doc_id}:{content}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], "big")
+
+
 async def _handle_remote(doc_id: str, kind: bytes, payload: bytes) -> None:
     """Apply a message another process published for this doc."""
     room = websocket_server.rooms.get(doc_id)
@@ -287,7 +316,15 @@ async def _seed_room_from_disk(doc_id: str, blob_path: str):
             content = docstore.read_document(blob_path)
         except FileNotFoundError:
             content = ""
-        if content:
+        if content and broadcaster.enabled:
+            # Seed through a throwaway Doc whose client id derives from the
+            # doc id + content: processes seeding the same disk content at the
+            # same moment produce identical updates that dedupe on merge,
+            # instead of two copies under different random client ids.
+            seed_doc = Doc(client_id=_seed_client_id(doc_id, content))
+            seed_doc.get(TEXT_KEY, type=Text).insert(0, content)
+            room.ydoc.apply_update(seed_doc.get_update())
+        elif content:
             ytext.insert(0, content)
 
     def _on_text_change(_event) -> None:
@@ -300,7 +337,7 @@ async def _seed_room_from_disk(doc_id: str, blob_path: str):
         def _on_ydoc_update(event) -> None:
             if doc_id in _applying_remote:
                 return
-            asyncio.ensure_future(broadcaster.publish(doc_id, pubsub.KIND_UPDATE, event.update))
+            broadcaster.publish_nowait(doc_id, pubsub.KIND_UPDATE, event.update)
 
         _update_observers[doc_id] = room.ydoc.observe(_on_ydoc_update)
         _ready_doc_ids.add(doc_id)
@@ -358,6 +395,7 @@ async def doc_sync(websocket: WebSocket, doc_id: str):
 
     _user_open_doc[user.id] = (doc_id, user.display_name, websocket)
     await broadcaster.set_presence(user.id, doc_id, user.display_name)
+    await broadcaster.publish_user_opened(user.id, doc_id)
 
     room = await _seed_room_from_disk(doc_id, blob_path)
 

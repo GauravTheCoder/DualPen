@@ -323,8 +323,8 @@ All optional; set in the systemd unit's `Environment=` lines.
 | `COLLAB_EDITOR_MAX_BODY_BYTES` | `10485760` | Max HTTP request body (413 beyond). |
 | `COLLAB_EDITOR_IMPORT_MAX_ENTRIES` | `5000` | Max entries in an imported zip. |
 | `COLLAB_EDITOR_IMPORT_MAX_UNCOMPRESSED_BYTES` | `52428800` | Max total uncompressed import size. |
-| `COLLAB_EDITOR_LOGIN_RATE_LIMIT` | `10` | Login requests per window per IP (429 beyond; `0` disables). |
-| `COLLAB_EDITOR_ADMIN_RATE_LIMIT` | `120` | `/api/admin/*` requests per window per IP. |
+| `COLLAB_EDITOR_LOGIN_RATE_LIMIT` | `10` | Failed logins per window per IP (429 beyond; `0` disables). Successful logins aren't counted. |
+| `COLLAB_EDITOR_ADMIN_RATE_LIMIT` | `120` | `/api/admin/*` requests per window, per signed-in user (unauthenticated requests use a separate per-IP bucket). |
 | `COLLAB_EDITOR_RATE_LIMIT_WINDOW_SECONDS` | `60` | Rate-limit window. |
 | `COLLAB_EDITOR_RATE_LIMIT_ENABLED` | `true` | Master switch for rate limiting. |
 | `COLLAB_EDITOR_REDIS_URL` | unset | Enables multi-process realtime sync/presence/chat via Redis pub/sub. |
@@ -337,13 +337,15 @@ unauthenticated beyond what Redis itself enforces) and use a shared docstore vol
 
 ### Remaining caveats
 
+- Passwords must be 8-256 characters (admin API, UI and `create-admin`).
 - Rate limiting is per process and keyed on the client IP. Behind nginx, run uvicorn with
   `--proxy-headers` (and trusted `--forwarded-allow-ips`) or all users share one bucket.
-  Limiter state is not pruned and is not shared between workers.
-- A zip import whose declared sizes lie can be stopped mid-import, leaving a partial
-  import folder.
-- Redis mode: the "one open document per user" rule is enforced per process only; a doc
-  state is persisted as text, so edits from the last ~2s are lost if every process holding
-  a room crashes; two processes opening the same doc at the exact same instant can
-  duplicate seeded text; a first open waits up to 0.5s for peers to share state; if Redis
-  goes down, local editing continues but cross-process fan-out stops.
+  A correct login from an IP already locked out by failed attempts still gets 429 until the
+  window expires. Limits aren't shared between workers.
+- Redis mode: cross-process "one open document per user" closing isn't atomic (two
+  simultaneous opens on different processes can close each other); doc state is persisted
+  as text, so edits from the last ~2s are lost if every process holding a room crashes; a
+  first open waits up to 0.5s for peers; the publish queue is unbounded in memory during a
+  long Redis outage, and batches are dropped after retries (state resyncs when Redis
+  returns); presence from a hard-killed process lingers ~15s; resync sends full doc state.
+  Redis pub/sub is unauthenticated beyond Redis itself, so keep it on a trusted network.

@@ -2,8 +2,12 @@ import os
 import time
 from collections import defaultdict, deque
 
-from fastapi import HTTPException, Request, status
+from fastapi import Cookie, Depends, HTTPException, Request, status
+from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import JSONResponse
+
+from server.app.auth import SESSION_COOKIE_NAME, get_user_for_session_token
+from server.app.db import get_db
 
 _FALSE = ("0", "false", "no")
 
@@ -16,7 +20,15 @@ def _env_int(name: str, default: int) -> int:
 
 
 def max_body_bytes() -> int:
+    """Request body cap in bytes. A value <= 0 disables the cap."""
     return _env_int("COLLAB_EDITOR_MAX_BODY_BYTES", 10 * 1024 * 1024)
+
+
+def _window_seconds() -> int:
+    """Rate-limit window; <= 0 or unparseable falls back to 60 (never disables;
+    use COLLAB_EDITOR_RATE_LIMIT_ENABLED=false or a limit <= 0 for that)."""
+    window = _env_int("COLLAB_EDITOR_RATE_LIMIT_WINDOW_SECONDS", 60)
+    return window if window > 0 else 60
 
 
 class BodySizeLimitMiddleware:
@@ -33,6 +45,9 @@ class BodySizeLimitMiddleware:
             return
 
         limit = max_body_bytes()
+        if limit <= 0:
+            await self.app(scope, receive, send)
+            return
         too_large = JSONResponse({"detail": "Request body too large"}, status_code=413)
 
         for name, value in scope["headers"]:
@@ -72,41 +87,97 @@ class BodySizeLimitMiddleware:
             await too_large(scope, receive, send)
 
 
-# --- rate limiting (in-process sliding window, keyed by client IP) ---
+# --- rate limiting (in-process sliding window) ---
 
 _hits: dict[tuple[str, str], deque] = defaultdict(deque)
+_last_sweep = 0.0
 
 
 def reset_rate_limits() -> None:
+    global _last_sweep
     _hits.clear()
+    _last_sweep = 0.0
 
 
-def _rate_limit(scope_name: str, env_name: str, default: int):
-    async def dependency(request: Request) -> None:
-        if os.environ.get("COLLAB_EDITOR_RATE_LIMIT_ENABLED", "true").strip().lower() in _FALSE:
-            return
-        limit = _env_int(env_name, default)
-        window = _env_int("COLLAB_EDITOR_RATE_LIMIT_WINDOW_SECONDS", 60)
-        if limit <= 0:
-            return
-        # request.client is the direct peer; behind a reverse proxy this is
-        # the proxy's address unless uvicorn --proxy-headers rewrites it.
-        ip = request.client.host if request.client else "unknown"
-        now = time.monotonic()
-        hits = _hits[(scope_name, ip)]
+def _enabled() -> bool:
+    return os.environ.get("COLLAB_EDITOR_RATE_LIMIT_ENABLED", "true").strip().lower() not in _FALSE
+
+
+def _client_ip(request: Request) -> str:
+    # request.client is the direct peer; behind a reverse proxy this is
+    # the proxy's address unless uvicorn --proxy-headers rewrites it.
+    return request.client.host if request.client else "unknown"
+
+
+def _sweep(now: float, window: int) -> None:
+    """Drops keys with no hits inside the window, at most once per window,
+    so memory stays bounded by recently-active keys."""
+    global _last_sweep
+    if now - _last_sweep < window:
+        return
+    _last_sweep = now
+    for key in [k for k, d in _hits.items() if not d or now - d[-1] >= window]:
+        del _hits[key]
+
+
+def _check(key: tuple[str, str], limit: int, record: bool) -> None:
+    """Raises 429 if `key` is at its limit; otherwise records a hit if asked."""
+    window = _window_seconds()
+    now = time.monotonic()
+    _sweep(now, window)
+    hits = _hits.get(key)
+    if hits is not None:
         while hits and now - hits[0] >= window:
             hits.popleft()
-        if len(hits) >= limit:
-            retry_after = max(1, int(window - (now - hits[0])) + 1)
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Too many requests",
-                headers={"Retry-After": str(retry_after)},
-            )
-        hits.append(now)
+        if not hits:
+            del _hits[key]
+            hits = None
+    if hits is not None and len(hits) >= limit:
+        retry_after = max(1, int(window - (now - hits[0])) + 1)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many requests",
+            headers={"Retry-After": str(retry_after)},
+        )
+    if record:
+        _hits[key].append(now)
 
-    return dependency
+
+def _login_limit() -> int:
+    return _env_int("COLLAB_EDITOR_LOGIN_RATE_LIMIT", 10)
 
 
-login_rate_limit = _rate_limit("login", "COLLAB_EDITOR_LOGIN_RATE_LIMIT", 10)
-admin_rate_limit = _rate_limit("admin", "COLLAB_EDITOR_ADMIN_RATE_LIMIT", 120)
+async def login_rate_limit(request: Request) -> None:
+    """Per-IP check that does NOT record a hit; the login handler calls
+    record_login_failure() on failed attempts only, so successful logins never
+    consume the budget. Caveat: while an IP is limited by failures, even a
+    correct password gets 429 until the window expires."""
+    limit = _login_limit()
+    if not _enabled() or limit <= 0:
+        return
+    _check(("login", _client_ip(request)), limit, record=False)
+
+
+def record_login_failure(request: Request) -> None:
+    if not _enabled() or _login_limit() <= 0:
+        return
+    _hits[("login", _client_ip(request))].append(time.monotonic())
+
+
+async def admin_rate_limit(
+    request: Request,
+    session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Authenticated requests are bucketed per user id; unauthenticated or
+    failed-auth requests go to a separate per-IP bucket (same limit), so they
+    can never consume an authenticated admin's budget."""
+    limit = _env_int("COLLAB_EDITOR_ADMIN_RATE_LIMIT", 120)
+    if not _enabled() or limit <= 0:
+        return
+    user = await get_user_for_session_token(db, session_token)
+    if user is not None:
+        key = ("admin-user", str(user.id))
+    else:
+        key = ("admin-anon", _client_ip(request))
+    _check(key, limit, record=True)

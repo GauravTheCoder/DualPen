@@ -1,7 +1,9 @@
 import io
 import os
 import zipfile
+import zlib
 
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.app import docstore, node_service
@@ -80,7 +82,40 @@ async def import_zip(
     except ValueError:
         root_name = "Imported"
 
+    created: list[tuple[str, str | None]] = []
+    try:
+        root = await _import_entries(db, zf, root_name, parent_id, created)
+    except Exception as e:
+        await _rollback_import(db, created)
+        if isinstance(e, (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError)) and not isinstance(
+            e, ImportTooLargeError
+        ):
+            raise InvalidZipError(f"could not read zip contents: {e}") from e
+        raise
+    return root[0], root[1]
+
+
+async def _rollback_import(db: AsyncSession, created: list[tuple[str, str | None]]) -> None:
+    """Removes every node (and blob) created by a failed import so no partial
+    root folder is left behind."""
+    await db.rollback()
+    ids = [i for i, _ in created]
+    blobs = [b for _, b in created if b]
+    if ids:
+        await db.execute(delete(Node).where(Node.id.in_(ids)))
+        await db.commit()
+    for blob in blobs:
+        try:
+            docstore.delete_document(blob)
+        except OSError:
+            pass
+
+
+async def _import_entries(
+    db: AsyncSession, zf: zipfile.ZipFile, root_name: str, parent_id: str | None, created: list[tuple[str, str | None]]
+) -> tuple[Node, list[str]]:
     root = await node_service.create_folder(db, root_name, parent_id)
+    created.append((root.id, None))
 
     # Maps a validated folder-path tuple (relative to the zip root) to the
     # Node id already created for it, so multiple files under the same
@@ -92,6 +127,7 @@ async def import_zip(
             return folder_ids[path]
         parent = await _ensure_folder(path[:-1])
         folder = await node_service.create_folder(db, path[-1], parent)
+        created.append((folder.id, None))
         folder_ids[path] = folder.id
         return folder.id
 
@@ -128,6 +164,7 @@ async def import_zip(
         parent_folder_id = await _ensure_folder(folder_path)
 
         document = await node_service.create_document(db, file_name, parent_folder_id)
+        created.append((document.id, document.blob_path))
         if content:
             await node_service.set_document_content(db, document.id, content)
 

@@ -89,6 +89,99 @@ async def test_redis_broadcaster_presence_shared_and_cleared():
     await b.stop()
 
 
+async def test_burst_publishes_arrive_in_order_via_single_worker():
+    server = fakeredis.FakeServer()
+    a, b = _fake_broadcaster(server), _fake_broadcaster(server)
+    got = []
+
+    async def handler(kind, payload):
+        got.append(payload)
+
+    await a.start()
+    await b.start()
+    await b.subscribe("d1", handler)
+    for i in range(500):
+        a.publish_nowait("d1", pubsub.KIND_UPDATE, str(i).encode())
+    assert await _eventually(lambda: len(got) == 500, timeout=10)
+    assert got == [str(i).encode() for i in range(500)]
+    await a.stop()
+    await b.stop()
+
+
+async def test_publish_retries_then_resyncs_after_failure(monkeypatch):
+    monkeypatch.setattr(pubsub, "RESYNC_DELAY_SECONDS", 0.05)
+    server = fakeredis.FakeServer()
+    a = _fake_broadcaster(server)
+    resynced = []
+
+    async def on_resync(doc_id):
+        resynced.append(doc_id)
+
+    async def noop(kind, payload):
+        pass
+
+    a.set_resync_handler(on_resync)
+    await a.start()
+    await a.subscribe("d1", noop)
+
+    real_pipeline = a._redis.pipeline
+    calls = {"n": 0}
+
+    def flaky_pipeline(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionError("stale connection")
+        return real_pipeline(*args, **kwargs)
+
+    monkeypatch.setattr(a._redis, "pipeline", flaky_pipeline)
+    a.publish_nowait("d1", pubsub.KIND_UPDATE, b"x")
+    assert await _eventually(lambda: resynced == ["d1"])
+    assert calls["n"] >= 2  # first attempt failed, retry succeeded
+    await a.stop()
+
+
+async def test_control_message_reaches_other_process_only():
+    server = fakeredis.FakeServer()
+    a, b = _fake_broadcaster(server), _fake_broadcaster(server)
+    got_a, got_b = [], []
+
+    async def ca(user_id, doc_id):
+        got_a.append((user_id, doc_id))
+
+    async def cb(user_id, doc_id):
+        got_b.append((user_id, doc_id))
+
+    a.set_control_handler(ca)
+    b.set_control_handler(cb)
+    await a.start()
+    await b.start()
+    await a.publish_user_opened(5, "doc-1")
+    assert await _eventually(lambda: got_b == [(5, "doc-1")])
+    assert got_a == []
+    await a.stop()
+    await b.stop()
+
+
+async def test_list_presence_times_out_fast(monkeypatch):
+    monkeypatch.setattr(pubsub, "PRESENCE_LIST_TIMEOUT_SECONDS", 0.1)
+    b = _fake_broadcaster(fakeredis.FakeServer())
+
+    async def hang(*args, **kwargs):
+        await asyncio.sleep(10)
+
+    monkeypatch.setattr(b._redis, "get", hang)
+    await b._redis.set("collab:presence:x:1", json.dumps({"doc_id": "d", "display_name": "n"}))
+    start = asyncio.get_event_loop().time()
+    assert await b.list_presence() == {}
+    assert asyncio.get_event_loop().time() - start < 2
+
+
+def test_seed_client_id_is_deterministic_and_content_sensitive():
+    assert sync_module._seed_client_id("d", "abc") == sync_module._seed_client_id("d", "abc")
+    assert sync_module._seed_client_id("d", "abc") != sync_module._seed_client_id("d", "abd")
+    assert sync_module._seed_client_id("d", "abc") != sync_module._seed_client_id("e", "abc")
+
+
 # --- Two-process simulation over the real sync route ---
 #
 # The app under test is "process 1" (module-global sync.broadcaster swapped for

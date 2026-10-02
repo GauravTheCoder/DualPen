@@ -1,7 +1,9 @@
 import datetime
 import re
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 # Reject characters Windows/most filesystems forbid in a single path segment,
 # so names stay portable if documents are ever exported to real files.
@@ -33,15 +35,22 @@ class LoginRequest(BaseModel):
     password: str
 
 
+Username = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
+DisplayName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
+PASSWORD_MIN_LENGTH = 8
+PASSWORD_MAX_LENGTH = 256
+Password = Annotated[str, Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)]
+
+
 class CreateUserRequest(BaseModel):
-    username: str
-    display_name: str
-    initial_password: str
+    username: Username
+    display_name: DisplayName
+    initial_password: Password
 
 
 class UpdateUserRequest(BaseModel):
-    display_name: str | None = None
-    new_password: str | None = None
+    display_name: DisplayName | None = None
+    new_password: Password | None = None
     is_admin: bool | None = None
     is_active: bool | None = None
 
