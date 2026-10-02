@@ -25,7 +25,10 @@ screen-reader-accessible, so blind and sighted collaborators can edit documents 
 - Zip import and export, so you can easily migrate documents to or from DualPen
 - Server-wide AES-256-GCM encryption at rest for document content, argon2id-hashed
   passwords, and admin-managed accounts (no self-signup) with list/create/update
-  (rename, reset password, toggle admin/active) and deactivate (soft-delete) endpoints.
+  (rename, reset password, toggle admin/active) and deactivate (soft-delete) endpoints,
+  plus an in-app Admin dialog (toolbar button, admins only) over those endpoints.
+- Request body size cap, zip import limits, and in-process rate limiting (all configurable)
+- Optional Redis pub/sub for running multiple backend workers
 - Encrypted backup support
 
 ## Stack
@@ -47,9 +50,13 @@ cd server
 python -m venv ../.venv
 ../.venv/bin/activate      # or ..\.venv\Scripts\activate on Windows
 pip install -r requirements.txt
-python -m server.cli create-admin   # first-run only, interactive prompts
+python -m server.cli create-admin   # first-run only; prompts (password: 8+ characters)
 uvicorn server.app.main:app --reload --port 8000
 ```
+
+The session cookie is `Secure` by default. Chrome and Firefox accept it on
+`http://localhost`; Safari doesn't, so there set `COLLAB_EDITOR_COOKIE_SECURE=0` before
+starting the backend.
 
 Run from the **repository root**, not `server/` — the app is imported as `server.app.main`
 and reads/writes `server_data/` relative to the repo root.
@@ -229,7 +236,7 @@ After=network.target
 Type=simple
 User=collab-editor
 WorkingDirectory=/opt/collab-editor
-ExecStart=/opt/collab-editor/.venv/bin/uvicorn server.app.main:app --host 127.0.0.1 --port 8000
+ExecStart=/opt/collab-editor/.venv/bin/uvicorn server.app.main:app --host 127.0.0.1 --port 8000 --proxy-headers
 Restart=on-failure
 RestartSec=5
 
@@ -269,9 +276,11 @@ server {
     }
 
     location /api/ {
+        client_max_body_size 10m;  # match COLLAB_EDITOR_MAX_BODY_BYTES (nginx default is 1m)
         proxy_pass http://127.0.0.1:8000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;  # per-user rate limiting
     }
 
     location /ws/ {
@@ -280,6 +289,7 @@ server {
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_read_timeout 3600s;  # long-lived collaboration sessions
     }
 }
