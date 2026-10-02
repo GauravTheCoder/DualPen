@@ -210,3 +210,34 @@ export async function exportZip(nodeId: string | null): Promise<{ blob: Blob; fi
   const filename = match ? match[1] : "export.zip";
   return { blob: await resp.blob(), filename };
 }
+
+export function adminListUsers(): Promise<CurrentUser[]> {
+  return request("/admin/users");
+}
+
+export function adminCreateUser(
+  username: string,
+  displayName: string,
+  initialPassword: string,
+): Promise<CurrentUser> {
+  return request("/admin/users", {
+    method: "POST",
+    body: JSON.stringify({
+      username,
+      display_name: displayName,
+      initial_password: initialPassword,
+    }),
+  });
+}
+
+export function adminUpdateUser(
+  userId: number,
+  changes: {
+    display_name?: string;
+    new_password?: string;
+    is_admin?: boolean;
+    is_active?: boolean;
+  },
+): Promise<CurrentUser> {
+  return request(`/admin/users/${userId}`, { method: "PATCH", body: JSON.stringify(changes) });
+}

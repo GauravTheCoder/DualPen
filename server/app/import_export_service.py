@@ -1,4 +1,5 @@
 import io
+import os
 import zipfile
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +11,32 @@ from server.app.schemas import validate_node_name
 
 class InvalidZipError(Exception):
     pass
+
+
+class ImportTooLargeError(Exception):
+    pass
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+def _max_uncompressed() -> int:
+    return _env_int("COLLAB_EDITOR_IMPORT_MAX_UNCOMPRESSED_BYTES", 50 * 1024 * 1024)
+
+
+def _check_zip_limits(zf: zipfile.ZipFile) -> None:
+    """Rejects zip bombs up front using declared entry count and sizes; the
+    read loop also bounds actual bytes read, since declared sizes can lie."""
+    max_entries = _env_int("COLLAB_EDITOR_IMPORT_MAX_ENTRIES", 5000)
+    infos = zf.infolist()
+    if len(infos) > max_entries:
+        raise ImportTooLargeError(f"zip has too many entries (limit {max_entries})")
+    if sum(i.file_size for i in infos) > _max_uncompressed():
+        raise ImportTooLargeError(f"zip uncompressed size exceeds limit ({_max_uncompressed()} bytes)")
 
 
 def _split_and_validate_path(zip_path: str) -> list[str] | None:
@@ -45,6 +72,8 @@ async def import_zip(
     except zipfile.BadZipFile as e:
         raise InvalidZipError("not a valid zip file") from e
 
+    _check_zip_limits(zf)
+
     root_name = zip_filename[:-4] if zip_filename.lower().endswith(".zip") else zip_filename
     try:
         root_name = validate_node_name(root_name)
@@ -67,6 +96,8 @@ async def import_zip(
         return folder.id
 
     skipped: list[str] = []
+    max_total = _max_uncompressed()
+    total_read = 0
 
     for info in zf.infolist():
         if info.is_dir():
@@ -81,7 +112,11 @@ async def import_zip(
             skipped.append(info.filename)
             continue
 
-        raw_bytes = zf.read(info)
+        with zf.open(info) as fh:
+            raw_bytes = fh.read(max_total - total_read + 1)
+        total_read += len(raw_bytes)
+        if total_read > max_total:
+            raise ImportTooLargeError(f"zip uncompressed size exceeds limit ({max_total} bytes)")
         try:
             content = raw_bytes.decode("utf-8")
         except UnicodeDecodeError:

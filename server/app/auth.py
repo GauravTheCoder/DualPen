@@ -1,4 +1,5 @@
 import datetime
+import os
 import secrets
 
 from fastapi import Cookie, Depends, HTTPException, Response, status
@@ -27,11 +28,17 @@ async def create_session(db: AsyncSession, user: User) -> Session:
     return session
 
 
+def _cookie_secure() -> bool:
+    # Secure by default; set COLLAB_EDITOR_COOKIE_SECURE=0 for local http dev.
+    return os.environ.get("COLLAB_EDITOR_COOKIE_SECURE", "true").strip().lower() not in ("0", "false", "no")
+
+
 def set_session_cookie(response: Response, session: Session) -> None:
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=session.token,
         httponly=True,
+        secure=_cookie_secure(),
         samesite="lax",
         max_age=int(SESSION_LIFETIME.total_seconds()),
         path="/",

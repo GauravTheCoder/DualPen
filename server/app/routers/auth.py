@@ -10,6 +10,7 @@ from server.app.auth import (
     SESSION_COOKIE_NAME,
 )
 from server.app.db import get_db
+from server.app.limits import login_rate_limit
 from server.app.models import Session, User
 from server.app.schemas import LoginRequest, UserOut
 from server.app.security import verify_password
@@ -17,7 +18,7 @@ from server.app.security import verify_password
 router = APIRouter(tags=["auth"])
 
 
-@router.post("/login", response_model=UserOut)
+@router.post("/login", response_model=UserOut, dependencies=[Depends(login_rate_limit)])
 async def login(payload: LoginRequest, response: Response, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.username == payload.username))
     user = result.scalar_one_or_none()

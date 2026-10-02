@@ -182,15 +182,23 @@ sudo systemctl enable --now collab-editor-backup.timer
 **To restore:** stop the service, extract the archive's `db/app.db`, `docstore/`, and
 `master.key` into `server_data/` (overwriting what's there), then restart.
 
-Create the first admin account (interactive — do this over your SSH session, not
-scripted, since it prompts for username/display name/password):
+Create the first admin account. Interactive by default (prompts for
+username/display name/password):
 
 ```bash
 .venv/bin/python -m server.cli create-admin
 ```
 
-Additional users are created afterward from the admin account, via the app's admin API
-(no UI for this yet — gated by `is_admin`): `GET /api/admin/users` lists accounts,
+For scripted/provisioning use, pass `--username` (plus optional `--display-name`) and
+pipe the password in with `--password-stdin`, or set `COLLAB_EDITOR_ADMIN_USERNAME` /
+`COLLAB_EDITOR_ADMIN_PASSWORD`:
+
+```bash
+printf '%s' "$PW" | .venv/bin/python -m server.cli create-admin --username alice --password-stdin
+```
+
+Additional users are managed from the **Admin** button in the app toolbar (visible to
+admins only), or directly via the admin API (gated by `is_admin`): `GET /api/admin/users` lists accounts,
 `POST /api/admin/users` creates one, `PATCH /api/admin/users/{id}` updates display name,
 password, admin flag, or active flag, and `DELETE /api/admin/users/{id}` deactivates an
 account (`is_active=false`) rather than hard-deleting it.
@@ -305,17 +313,37 @@ If the frontend and backend are on different origins:
   VITE_API_BASE=https://api.example.com/api VITE_WS_BASE=wss://api.example.com npm run build
   ```
 
-### Known limitations to be aware of before going live
+### Hardening settings
 
-- The session cookie is `HttpOnly`/`SameSite=Lax` but not marked `Secure` — harmless as
-  long as TLS is terminated at the reverse proxy (the browser-facing connection is what
-  matters), but don't serve this directly over plain HTTP in production.
-- There's no admin UI yet — account management is via the CLI (first admin only) and the
-  `/api/admin/*` REST endpoints directly.
-- `create-admin` has no non-interactive/scripted mode (no flags, no env vars) — it's
-  meant for one manual run over SSH.
-- No rate limiting, no request body size cap, and no import size/entry-count limits exist
-  anywhere in the stack. Fine for a small trusted group; don't expose this to the open
-  internet as-is if that's a concern for you.
-- Single-process, in-memory room registry for realtime sync — sized for a small trusted
-  group, not for horizontal scaling.
+All optional; set in the systemd unit's `Environment=` lines.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `COLLAB_EDITOR_COOKIE_SECURE` | `true` | `Secure` flag on the session cookie. Set `0` only for plain-HTTP local dev. |
+| `COLLAB_EDITOR_MAX_BODY_BYTES` | `10485760` | Max HTTP request body (413 beyond). |
+| `COLLAB_EDITOR_IMPORT_MAX_ENTRIES` | `5000` | Max entries in an imported zip. |
+| `COLLAB_EDITOR_IMPORT_MAX_UNCOMPRESSED_BYTES` | `52428800` | Max total uncompressed import size. |
+| `COLLAB_EDITOR_LOGIN_RATE_LIMIT` | `10` | Login requests per window per IP (429 beyond; `0` disables). |
+| `COLLAB_EDITOR_ADMIN_RATE_LIMIT` | `120` | `/api/admin/*` requests per window per IP. |
+| `COLLAB_EDITOR_RATE_LIMIT_WINDOW_SECONDS` | `60` | Rate-limit window. |
+| `COLLAB_EDITOR_RATE_LIMIT_ENABLED` | `true` | Master switch for rate limiting. |
+| `COLLAB_EDITOR_REDIS_URL` | unset | Enables multi-process realtime sync/presence/chat via Redis pub/sub. |
+
+### Multiple workers (Redis)
+
+By default rooms live in one process's memory. To run several workers, point
+`COLLAB_EDITOR_REDIS_URL` at a Redis instance on a **trusted network** (pub/sub traffic is
+unauthenticated beyond what Redis itself enforces) and use a shared docstore volume.
+
+### Remaining caveats
+
+- Rate limiting is per process and keyed on the client IP. Behind nginx, run uvicorn with
+  `--proxy-headers` (and trusted `--forwarded-allow-ips`) or all users share one bucket.
+  Limiter state is not pruned and is not shared between workers.
+- A zip import whose declared sizes lie can be stopped mid-import, leaving a partial
+  import folder.
+- Redis mode: the "one open document per user" rule is enforced per process only; a doc
+  state is persisted as text, so edits from the last ~2s are lost if every process holding
+  a room crashes; two processes opening the same doc at the exact same instant can
+  duplicate seeded text; a first open waits up to 0.5s for peers to share state; if Redis
+  goes down, local editing continues but cross-process fan-out stops.
