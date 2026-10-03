@@ -153,20 +153,21 @@ def _login_limit() -> int:
 
 
 async def login_rate_limit(request: Request) -> None:
-    """Per-IP check that does NOT record a hit; the login handler calls
-    record_login_failure() on failed attempts only, so successful logins never
-    consume the budget. Caveat: while an IP is limited by failures, even a
-    correct password gets 429 until the window expires."""
+    """Per-IP check that reserves a slot up front (so a parallel burst can't
+    all pass before any failure is recorded); the login handler calls
+    refund_login_hit() on success so successful logins never consume the
+    budget. Caveat: while an IP is limited by failures, even a correct
+    password gets 429 until the window expires."""
     limit = _login_limit()
     if not _enabled() or limit <= 0:
         return
-    _check(("login", _client_ip(request)), limit, record=False)
+    _check(("login", _client_ip(request)), limit, record=True)
 
 
-def record_login_failure(request: Request) -> None:
-    if not _enabled() or _login_limit() <= 0:
-        return
-    _hits[("login", _client_ip(request))].append(time.monotonic())
+def refund_login_hit(request: Request) -> None:
+    hits = _hits.get(("login", _client_ip(request)))
+    if hits:
+        hits.pop()
 
 
 async def admin_rate_limit(

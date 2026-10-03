@@ -10,7 +10,7 @@ from server.app.auth import (
     SESSION_COOKIE_NAME,
 )
 from server.app.db import get_db
-from server.app.limits import login_rate_limit, record_login_failure
+from server.app.limits import login_rate_limit, refund_login_hit
 from server.app.models import Session, User
 from server.app.schemas import LoginRequest, UserOut
 from server.app.security import verify_password
@@ -26,9 +26,9 @@ async def login(payload: LoginRequest, request: Request, response: Response, db:
     invalid = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
 
     if user is None or not user.is_active or not verify_password(user.password_hash, payload.password):
-        record_login_failure(request)
         raise invalid
 
+    refund_login_hit(request)
     session = await create_session(db, user)
     set_session_cookie(response, session)
     return user

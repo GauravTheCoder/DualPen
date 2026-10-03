@@ -347,7 +347,11 @@ unauthenticated beyond what Redis itself enforces) and use a shared docstore vol
 
 ### Remaining caveats
 
-- Passwords must be 8-256 characters (admin API, UI and `create-admin`).
+- Passwords must be 8-256 characters (admin API, UI and `create-admin`). Login also rejects
+  passwords over 256 characters (422), so an account created earlier with a longer password
+  must be reset by an admin.
+- Failed logins and malformed login requests (e.g. 422) both count toward the login limit;
+  only successful logins are refunded.
 - Rate limiting is per process and keyed on the client IP. Behind nginx, run uvicorn with
   `--proxy-headers` (and trusted `--forwarded-allow-ips`) or all users share one bucket.
   A correct login from an IP already locked out by failed attempts still gets 429 until the

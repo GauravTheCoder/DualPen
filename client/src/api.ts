@@ -46,7 +46,8 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
         // {msg, loc, ...}, not a plain string.
         detail = body.detail
           .map((d: { msg?: string; loc?: unknown[] }) => {
-            const field = Array.isArray(d.loc) ? String(d.loc[d.loc.length - 1] ?? "") : "";
+            const last = Array.isArray(d.loc) ? d.loc[d.loc.length - 1] : "";
+            const field = typeof last === "string" ? last : "";
             const msg = d.msg ?? String(d);
             return field && field !== "body" ? `${field}: ${msg}` : msg;
           })

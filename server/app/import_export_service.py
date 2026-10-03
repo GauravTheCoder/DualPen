@@ -87,9 +87,12 @@ async def import_zip(
         root = await _import_entries(db, zf, root_name, parent_id, created)
     except Exception as e:
         await _rollback_import(db, created)
-        if isinstance(e, (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError)) and not isinstance(
-            e, ImportTooLargeError
-        ):
+        # zipfile reports encrypted entries as RuntimeError; other RuntimeErrors
+        # are server faults and must not be blamed on the upload.
+        unreadable = isinstance(e, (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError)) or (
+            isinstance(e, RuntimeError) and "password" in str(e).lower()
+        )
+        if unreadable and not isinstance(e, ImportTooLargeError):
             raise InvalidZipError(f"could not read zip contents: {e}") from e
         raise
     return root[0], root[1]

@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import weakref
 from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -43,6 +44,8 @@ STATE_WAIT_SECONDS = 0.5
 # already seeded this room's Y.Text from disk, and the debounce/flush timer
 # state for persistence. Keyed by doc_id, same lifetime as websocket_server.rooms.
 _seeded_doc_ids: set[str] = set()
+# Weak values: a lock disappears once no joiner holds or awaits it.
+_seed_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 _flush_tasks: dict[str, asyncio.Task] = {}
 _last_flush_at: dict[str, float] = {}
 # pycrdt's Subscription wraps a Rust object that isn't safe to drop from an
@@ -288,12 +291,28 @@ def _schedule_flush(doc_id: str, blob_path: str) -> None:
 
 
 async def _seed_room_from_disk(doc_id: str, blob_path: str):
-    room = await websocket_server.get_room(doc_id)
+    # Serialize per doc so a second joiner can't get a half-seeded room while
+    # the first is still waiting on peers. The room is fetched inside the lock
+    # so a failed seed that deletes its empty room can't leave a waiter with a
+    # stale one.
+    async with _seed_locks.setdefault(doc_id, asyncio.Lock()):
+        room = await websocket_server.get_room(doc_id)
+        if doc_id in _seeded_doc_ids:
+            return room
+        try:
+            await _seed_room(room, doc_id, blob_path)
+        except BaseException:
+            _state_events.pop(doc_id, None)
+            if broadcaster.enabled:
+                await broadcaster.unsubscribe(doc_id)
+            if not room.clients:
+                await websocket_server.delete_room(room=room)
+            raise
+        _seeded_doc_ids.add(doc_id)
+    return room
 
-    if doc_id in _seeded_doc_ids:
-        return room
-    _seeded_doc_ids.add(doc_id)
 
+async def _seed_room(room, doc_id: str, blob_path: str) -> None:
     ytext = room.ydoc.get(TEXT_KEY, type=Text)
     got_peer_state = False
     if broadcaster.enabled:
@@ -341,7 +360,6 @@ async def _seed_room_from_disk(doc_id: str, blob_path: str):
 
         _update_observers[doc_id] = room.ydoc.observe(_on_ydoc_update)
         _ready_doc_ids.add(doc_id)
-    return room
 
 
 @router.websocket("/ws/doc/{doc_id}")
@@ -397,15 +415,16 @@ async def doc_sync(websocket: WebSocket, doc_id: str):
     await broadcaster.set_presence(user.id, doc_id, user.display_name)
     await broadcaster.publish_user_opened(user.id, doc_id)
 
-    room = await _seed_room_from_disk(doc_id, blob_path)
+    room = None
 
     # WebsocketServer.serve() auto-deletes the room from its registry the
     # instant the last client disconnects (before returning control to us),
     # which would race our own disconnect-triggered flush below. Drive the
     # room directly instead so we control exactly when it's read and torn
     # down: seed -> serve -> persist -> delete, in that order.
-    channel = FastAPIChannel(websocket, doc_id, user, room)
     try:
+        room = await _seed_room_from_disk(doc_id, blob_path)
+        channel = FastAPIChannel(websocket, doc_id, user, room)
         await room.serve(channel)
     finally:
         # Only clear/own this user's entry if it still points at *this*
@@ -421,20 +440,21 @@ async def doc_sync(websocket: WebSocket, doc_id: str):
         # Make sure this client's last edits aren't left sitting only in the
         # debounce window if they just close the tab, and that multi-client
         # rooms are only torn down once truly empty.
-        _persist_doc_id(doc_id, blob_path)
-        pending = _flush_tasks.pop(doc_id, None)
-        if pending is not None and not pending.done():
-            pending.cancel()
-        if not room.clients:
-            await websocket_server.delete_room(room=room)
-            _seeded_doc_ids.discard(doc_id)
-            _last_flush_at.pop(doc_id, None)
-            observer = _observers.pop(doc_id, None)
-            if observer is not None:
-                observer.drop()
-            if broadcaster.enabled:
-                _ready_doc_ids.discard(doc_id)
-                await broadcaster.unsubscribe(doc_id)
-                update_observer = _update_observers.pop(doc_id, None)
-                if update_observer is not None:
-                    update_observer.drop()
+        if room is not None:
+            _persist_doc_id(doc_id, blob_path)
+            pending = _flush_tasks.pop(doc_id, None)
+            if pending is not None and not pending.done():
+                pending.cancel()
+            if not room.clients:
+                await websocket_server.delete_room(room=room)
+                _seeded_doc_ids.discard(doc_id)
+                _last_flush_at.pop(doc_id, None)
+                observer = _observers.pop(doc_id, None)
+                if observer is not None:
+                    observer.drop()
+                if broadcaster.enabled:
+                    _ready_doc_ids.discard(doc_id)
+                    await broadcaster.unsubscribe(doc_id)
+                    update_observer = _update_observers.pop(doc_id, None)
+                    if update_observer is not None:
+                        update_observer.drop()

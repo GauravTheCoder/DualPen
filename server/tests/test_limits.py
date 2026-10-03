@@ -239,3 +239,39 @@ async def test_import_too_large_mid_loop_rolls_back(user_client, monkeypatch):
     assert resp.status_code == 413
     tree = await user_client.get("/api/tree")
     assert "m" not in [n["name"] for n in tree.json()]
+
+
+async def test_login_rate_limit_holds_under_parallel_burst(client, normal_user, monkeypatch):
+    import asyncio
+    from collections import Counter
+
+    monkeypatch.setenv("COLLAB_EDITOR_LOGIN_RATE_LIMIT", "5")
+    rs = await asyncio.gather(
+        *[client.post("/api/login", json={"username": "alice", "password": "bad"}) for _ in range(30)]
+    )
+    assert Counter(r.status_code for r in rs) == {401: 5, 429: 25}
+
+
+async def test_successful_logins_do_not_consume_login_budget(client, normal_user, monkeypatch):
+    monkeypatch.setenv("COLLAB_EDITOR_LOGIN_RATE_LIMIT", "2")
+    for _ in range(6):
+        r = await client.post("/api/login", json={"username": "alice", "password": "alicepass123"})
+        assert r.status_code == 200
+
+
+# --- import error mapping ---
+
+@pytest.mark.parametrize(
+    "message, expected",
+    [("File 'a.txt' is encrypted, password required", import_export_service.InvalidZipError), ("db exploded", RuntimeError)],
+)
+async def test_import_runtime_error_mapping(normal_user, monkeypatch, message, expected):
+    from server.app.db import AsyncSessionLocal
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(import_export_service, "_import_entries", boom)
+    async with AsyncSessionLocal() as db:
+        with pytest.raises(expected):
+            await import_export_service.import_zip(db, _zip({"a.txt": "x"}), "z.zip", None)
