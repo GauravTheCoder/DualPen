@@ -125,8 +125,8 @@ def _sweep(now: float, window: int) -> None:
         del _hits[key]
 
 
-def _check(key: tuple[str, str], limit: int, record: bool) -> None:
-    """Raises 429 if `key` is at its limit; otherwise records a hit if asked."""
+def _check(key: tuple[str, str], limit: int) -> None:
+    """Raises 429 if `key` is at its limit; otherwise records a hit."""
     window = _window_seconds()
     now = time.monotonic()
     _sweep(now, window)
@@ -144,8 +144,7 @@ def _check(key: tuple[str, str], limit: int, record: bool) -> None:
             detail="Too many requests",
             headers={"Retry-After": str(retry_after)},
         )
-    if record:
-        _hits[key].append(now)
+    _hits[key].append(now)
 
 
 def _login_limit() -> int:
@@ -161,7 +160,7 @@ async def login_rate_limit(request: Request) -> None:
     limit = _login_limit()
     if not _enabled() or limit <= 0:
         return
-    _check(("login", _client_ip(request)), limit, record=True)
+    _check(("login", _client_ip(request)), limit)
 
 
 def refund_login_hit(request: Request) -> None:
@@ -186,4 +185,4 @@ async def admin_rate_limit(
         key = ("admin-user", str(user.id))
     else:
         key = ("admin-anon", _client_ip(request))
-    _check(key, limit, record=True)
+    _check(key, limit)

@@ -197,7 +197,7 @@ def test_expired_keys_are_pruned(monkeypatch):
     monkeypatch.setenv("COLLAB_EDITOR_RATE_LIMIT_WINDOW_SECONDS", "1")
     limits._hits[("login", "1.2.3.4")].append(limits.time.monotonic() - 100)
     limits._hits[("login", "5.6.7.8")].append(limits.time.monotonic() - 100)
-    limits._check(("login", "9.9.9.9"), 5, record=True)
+    limits._check(("login", "9.9.9.9"), 5)
     assert ("login", "1.2.3.4") not in limits._hits
     assert ("login", "5.6.7.8") not in limits._hits
 
