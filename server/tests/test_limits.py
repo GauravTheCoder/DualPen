@@ -57,6 +57,35 @@ async def test_streamed_body_over_cap_413(client, monkeypatch):
     assert resp.status_code == 413
 
 
+async def test_streamed_body_read_by_handler_413(monkeypatch):
+    import httpx
+    from starlette.applications import Starlette
+    from starlette.responses import PlainTextResponse
+    from starlette.routing import Route
+
+    from server.app.limits import BodySizeLimitMiddleware
+
+    monkeypatch.setenv("COLLAB_EDITOR_MAX_BODY_BYTES", "1000")
+
+    async def handler(request):
+        return PlainTextResponse(str(len(await request.body())))
+
+    app = BodySizeLimitMiddleware(Starlette(routes=[Route("/", handler, methods=["POST"])]))
+
+    async def gen():
+        for _ in range(5):
+            yield b"x" * 500
+
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        assert (await c.post("/", content=gen())).status_code == 413
+
+
+async def test_login_password_too_long_422(client, monkeypatch):
+    resp = await client.post("/api/login", json={"username": "alice", "password": "x" * 1000})
+    assert resp.status_code == 422
+
+
 async def test_body_under_cap_ok(client, normal_user, monkeypatch):
     monkeypatch.setenv("COLLAB_EDITOR_MAX_BODY_BYTES", "1000")
     resp = await client.post("/api/login", json={"username": "alice", "password": "alicepass123"})

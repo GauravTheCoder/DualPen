@@ -30,15 +30,17 @@ class UserOut(BaseModel):
     created_at: datetime.datetime
 
 
+PASSWORD_MIN_LENGTH = 8
+PASSWORD_MAX_LENGTH = 256
+
+
 class LoginRequest(BaseModel):
     username: str
-    password: str
+    password: str = Field(max_length=PASSWORD_MAX_LENGTH)
 
 
 Username = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
 DisplayName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
-PASSWORD_MIN_LENGTH = 8
-PASSWORD_MAX_LENGTH = 256
 Password = Annotated[str, Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)]
 
 

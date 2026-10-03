@@ -82,7 +82,12 @@ class BodySizeLimitMiddleware:
                 response_started = True
             await send(message)
 
-        await self.app(scope, limited_receive, guarded_send)
+        try:
+            await self.app(scope, limited_receive, guarded_send)
+        except Exception:
+            # Handlers reading the truncated body raise (e.g. ClientDisconnect).
+            if not exceeded:
+                raise
         if exceeded and not response_started:
             await too_large(scope, receive, send)
 
