@@ -1,9 +1,11 @@
+import asyncio
 import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from server.app import share_service
 from server.app.db import init_db
 from server.app.limits import BodySizeLimitMiddleware
 from server.app.routers import admin, auth, documents, presence, share, sync
@@ -12,8 +14,12 @@ from server.app.routers import admin, auth, documents, presence, share, sync
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    async with sync.sync_lifespan():
-        yield
+    reaper = asyncio.create_task(share_service.reap_loop())
+    try:
+        async with sync.sync_lifespan():
+            yield
+    finally:
+        reaper.cancel()
 
 
 app = FastAPI(lifespan=lifespan)

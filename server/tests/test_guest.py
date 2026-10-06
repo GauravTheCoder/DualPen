@@ -53,3 +53,33 @@ async def test_delete_link_cleans_guests(normal_user):
         await db.refresh(guest)
         assert guest.is_active is False
         assert (await db.execute(select(User).where(User.id == normal_user.id))).first() is not None
+
+
+async def test_reap_expired_removes_idle_guests_but_keeps_chatters(normal_user):
+    from server.app import chat_service
+    from server.app.models import ChatMessage
+
+    old = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)
+    async with AsyncSessionLocal() as db:
+        doc, quiet = await _make_guest(db, normal_user)
+        chatty = await create_user(db, "guest-2", "Chatty", "x" * 20)
+        db.add(GuestGrant(user_id=chatty.id, doc_id=doc.id, read_only=False, link_id="tok"))
+        fresh = await create_user(db, "guest-3", "Fresh", "x" * 20)
+        db.add(GuestGrant(user_id=fresh.id, doc_id=doc.id, read_only=False, link_id="tok"))
+        for u in (quiet, chatty):
+            u.created_at = old
+            await auth.create_session(db, u)
+        expired = (await db.execute(select(Session))).scalars().all()
+        for s in expired:
+            s.expires_at = old
+        await db.commit()
+        await chat_service.create_message(db, doc_id=doc.id, user_id=chatty.id, display_name="Chatty", body="hi")
+
+        await share_service.reap_expired(db)
+
+        users = {u.username for u in (await db.execute(select(User))).scalars()}
+        assert "guest-1" not in users  # idle, old, no session: deleted
+        assert {"guest-2", "guest-3", "alice"} <= users  # chatted / too new / member: kept
+        assert (await db.execute(select(Session))).first() is None
+        assert (await db.execute(select(GuestGrant).where(GuestGrant.user_id == quiet.id))).first() is None
+        assert (await db.execute(select(ChatMessage))).first() is not None

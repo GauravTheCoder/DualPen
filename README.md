@@ -93,10 +93,10 @@ Open the document, click **Share**, choose *Can edit* or *View only*, and create
   (1 hour, 1 day, 7 days); an expired link refuses new joins (410) but guests already in keep their
   24-hour session. Revoke a link to cut them off immediately.
 - Link tokens are 24 random bytes, stored in plain text so the host can copy them again. Treat a link
-  like a password: anyone holding it can join. Joins are rate limited per IP (behind a reverse proxy,
-  run uvicorn with `--proxy-headers` so clients are not all counted as the proxy's address).
-- Guests are hidden from the Admin user list. Their user rows are kept (inactive after revoke)
-  because chat messages reference them.
+  like a password: anyone holding it can join. Joins are rate limited per IP (behind a reverse proxy, see
+  `COLLAB_EDITOR_TRUST_FORWARDED_FOR` below so clients are not all counted as the proxy's address).
+- Guests are hidden from the Admin user list. A background job (hourly) deletes expired sessions and
+  guests with no session left. Guests who sent chat messages are kept, since the messages reference them.
 - View-only guests can read and see live updates but not edit or chat. Every guest's cursor label is
   pinned by the server to their joined name.
 - Moving a shared document (or a folder containing one) into the Trash folder revokes its links.
@@ -362,6 +362,7 @@ All optional; set in the systemd unit's `Environment=` lines.
 | `COLLAB_EDITOR_LOGIN_RATE_LIMIT` | `10` | Failed logins per window per IP (429 beyond; `0` disables). Successful logins aren't counted. |
 | `COLLAB_EDITOR_ADMIN_RATE_LIMIT` | `120` | `/api/admin/*` requests per window, per signed-in user (unauthenticated requests use a separate per-IP bucket). |
 | `COLLAB_EDITOR_JOIN_RATE_LIMIT` | `20` | Guest joins per window per IP (429 beyond; `0` disables). |
+| `COLLAB_EDITOR_TRUST_FORWARDED_FOR` | `false` | Key rate limits on the last `X-Forwarded-For` entry. Set `true` only behind one trusted proxy that appends to it (the nginx config below does). Alternative to uvicorn `--proxy-headers`. |
 | `COLLAB_EDITOR_RATE_LIMIT_WINDOW_SECONDS` | `60` | Rate-limit window. |
 | `COLLAB_EDITOR_RATE_LIMIT_ENABLED` | `true` | Master switch for rate limiting. |
 | `COLLAB_EDITOR_REDIS_URL` | unset | Enables multi-process realtime sync/presence/chat via Redis pub/sub. |

@@ -1,9 +1,20 @@
+import asyncio
+import datetime
+import logging
+
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.app import node_service
-from server.app.models import GuestGrant, Node, Session, ShareLink, User
+from server.app.db import AsyncSessionLocal
+from server.app.models import ChatMessage, GuestGrant, Node, Session, ShareLink, User
 from server.app.routers.sync import kick_users
+
+logger = logging.getLogger(__name__)
+
+REAP_INTERVAL_SECONDS = 3600
+# Don't touch guests this young: join commits the user before its session exists.
+REAP_MIN_GUEST_AGE = datetime.timedelta(hours=1)
 
 # Same name the client uses for its auto-created root "Trash" folder.
 TRASH_FOLDER_NAME = "Trash"
@@ -44,3 +55,34 @@ async def end_sharing_if_trashed(db: AsyncSession, node: Node) -> None:
     for token in tokens:
         guest_ids += await delete_share_link(db, token)
     await kick_users(guest_ids)
+
+
+async def reap_expired(db: AsyncSession) -> None:
+    """Delete expired sessions, then guests that have no session left and never chatted
+    (chat messages reference their user id, so those rows are kept)."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    await db.execute(delete(Session).where(Session.expires_at < now))
+    stale = (
+        select(GuestGrant.user_id)
+        .join(User, User.id == GuestGrant.user_id)
+        .where(
+            User.created_at < now - REAP_MIN_GUEST_AGE,
+            GuestGrant.user_id.not_in(select(Session.user_id)),
+            GuestGrant.user_id.not_in(select(ChatMessage.user_id)),
+        )
+    )
+    stale_ids = list((await db.execute(stale)).scalars())
+    if stale_ids:
+        await db.execute(delete(GuestGrant).where(GuestGrant.user_id.in_(stale_ids)))
+        await db.execute(delete(User).where(User.id.in_(stale_ids)))
+    await db.commit()
+
+
+async def reap_loop() -> None:
+    while True:
+        try:
+            async with AsyncSessionLocal() as db:
+                await reap_expired(db)
+        except Exception:
+            logger.exception("Guest cleanup failed")
+        await asyncio.sleep(REAP_INTERVAL_SECONDS)
