@@ -42,6 +42,7 @@ import { MarkdownPreviewPanel } from "./markdown-preview";
 import { attachDocCollaboratorsList, type DocCollaboratorsList } from "./doc-collaborators";
 import { PresenceRosterPanel } from "./presence-roster";
 import { ShortcutsHelpPanel } from "./shortcuts-help";
+import { AdminPanel } from "./admin";
 
 const TRASH_FOLDER_NAME = "Trash";
 // Idle threshold after the last keystroke before a peer's isTyping flips back
@@ -80,6 +81,7 @@ let settingsPanel: SettingsPanel | null = null;
 let markdownPreviewPanel: MarkdownPreviewPanel | null = null;
 let presenceRosterPanel: PresenceRosterPanel | null = null;
 let shortcutsHelpPanel: ShortcutsHelpPanel | null = null;
+let adminPanel: AdminPanel | null = null;
 let treeRefreshTimer: number | null = null;
 // Tracks whether #move-status's live-region text was last set for "moving"
 // or "not moving", so updateTreeToolbar() (which reruns on every arrow-key
@@ -526,6 +528,7 @@ async function renderApp(): Promise<void> {
             <span id="tab-focus-indicator" role="status">Tab moves focus: OFF</span>
             <span id="doc-collaborators" role="status"></span>
             <button id="settings-btn" type="button">Settings</button>
+            ${currentUser?.is_admin ? '<button id="admin-btn" type="button">Admin</button>' : ""}
             <span id="save-status" role="status"></span>
           </div>
           <div id="editor-container" role="none"></div>
@@ -632,6 +635,7 @@ async function renderApp(): Promise<void> {
   setUpMarkdownPreview();
   setUpPresenceRoster();
   setUpShortcutsHelp();
+  setUpAdmin();
   setUpTreePolling();
 
   await refreshTree();
@@ -838,6 +842,14 @@ function setUpSettings(): void {
   document.querySelector<HTMLButtonElement>("#settings-btn")!.addEventListener("click", () => {
     settingsPanel?.openFocused();
   });
+}
+
+function setUpAdmin(): void {
+  const btn = document.querySelector<HTMLButtonElement>("#admin-btn");
+  if (!btn) return;
+  // Guarded singleton like setUpSettings(); dialog lives outside #app.
+  if (!adminPanel) adminPanel = new AdminPanel(() => currentUser?.id ?? null);
+  btn.addEventListener("click", () => void adminPanel?.open());
 }
 
 function setUpMarkdownPreview(): void {
