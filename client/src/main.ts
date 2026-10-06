@@ -18,7 +18,7 @@ import { MonacoBinding } from "y-monaco";
 import * as api from "./api";
 import type { NodeOut } from "./api";
 import { FileTree } from "./tree";
-import { DocSyncConnection, CLOSE_REPLACED_BY_NEWER_SESSION } from "./sync";
+import { DocSyncConnection, CLOSE_FORBIDDEN, CLOSE_REPLACED_BY_NEWER_SESSION } from "./sync";
 import type { ChatMessage } from "./sync";
 import { attachRemoteCursorStyles } from "./remote-cursors";
 import {
@@ -43,6 +43,7 @@ import { attachDocCollaboratorsList, type DocCollaboratorsList } from "./doc-col
 import { PresenceRosterPanel } from "./presence-roster";
 import { ShortcutsHelpPanel } from "./shortcuts-help";
 import { AdminPanel } from "./admin";
+import { ShareDialog, clearJoinHash, joinTokenFromHash, renderJoinForm } from "./share";
 
 const TRASH_FOLDER_NAME = "Trash";
 // Idle threshold after the last keystroke before a peer's isTyping flips back
@@ -82,6 +83,7 @@ let markdownPreviewPanel: MarkdownPreviewPanel | null = null;
 let presenceRosterPanel: PresenceRosterPanel | null = null;
 let shortcutsHelpPanel: ShortcutsHelpPanel | null = null;
 let adminPanel: AdminPanel | null = null;
+let shareDialog: ShareDialog | null = null;
 let treeRefreshTimer: number | null = null;
 // Tracks whether #move-status's live-region text was last set for "moving"
 // or "not moving", so updateTreeToolbar() (which reruns on every arrow-key
@@ -218,7 +220,7 @@ async function openDocument(node: NodeOut): Promise<void> {
       });
       const initialPosition = monacoEditor.getPosition();
       if (initialPosition) setLocalAwarenessCursor(sync, initialPosition, false);
-      monacoEditor.updateOptions({ readOnly: false });
+      monacoEditor.updateOptions({ readOnly: currentUser?.guest_read_only ?? false });
       statusEl.textContent = "";
       monacoEditor.focus();
     },
@@ -231,7 +233,9 @@ async function openDocument(node: NodeOut): Promise<void> {
       statusEl.textContent =
         closeCode === CLOSE_REPLACED_BY_NEWER_SESSION
           ? "This document was closed because you opened another document in a different tab or window."
-          : "Failed to load document";
+          : closeCode === CLOSE_FORBIDDEN
+            ? "Access to this shared document was revoked."
+            : "Failed to load document";
     },
     (message: ChatMessage) => {
       if (generation !== openGeneration) return;
@@ -491,13 +495,14 @@ function setUpTreePolling(): void {
 }
 
 async function renderApp(): Promise<void> {
+  const isGuest = currentUser?.is_guest ?? false;
   app.innerHTML = `
-    <div class="app-shell">
+    <div class="app-shell${isGuest ? " guest-mode" : ""}">
       <header class="app-header">
         <h1>DualPen</h1>
         <div class="header-right">
           <span id="user-info"></span>
-          <button id="presence-btn" type="button">Who's online</button>
+          ${isGuest ? "" : '<button id="presence-btn" type="button">Who\'s online</button>'}
           <button id="logout-btn" type="button">Log out</button>
         </div>
       </header>
@@ -527,6 +532,7 @@ async function renderApp(): Promise<void> {
             <span id="editor-title">No document open</span>
             <span id="tab-focus-indicator" role="status">Tab moves focus: OFF</span>
             <span id="doc-collaborators" role="status"></span>
+            ${isGuest ? "" : '<button id="share-btn" type="button">Share</button>'}
             <button id="settings-btn" type="button">Settings</button>
             ${currentUser?.is_admin ? '<button id="admin-btn" type="button">Admin</button>' : ""}
             <span id="save-status" role="status"></span>
@@ -538,7 +544,9 @@ async function renderApp(): Promise<void> {
   `;
 
   const userInfo = document.querySelector<HTMLElement>("#user-info")!;
-  userInfo.textContent = currentUser ? `Signed in as ${currentUser.display_name}` : "";
+  userInfo.textContent = currentUser
+    ? `Signed in as ${currentUser.display_name}${isGuest ? (currentUser.guest_read_only ? " (guest, view only)" : " (guest)") : ""}`
+    : "";
 
   document.querySelector<HTMLButtonElement>("#logout-btn")!.addEventListener("click", async () => {
     await api.logout();
@@ -633,12 +641,36 @@ async function renderApp(): Promise<void> {
   setUpChat();
   setUpSettings();
   setUpMarkdownPreview();
-  setUpPresenceRoster();
   setUpShortcutsHelp();
+
+  if (isGuest) {
+    // Guests only get their one document: no tree, roster or admin (the server refuses them anyway).
+    const docId = currentUser!.guest_doc_id!;
+    void openDocument({
+      id: docId,
+      parent_id: null,
+      name: currentUser!.guest_doc_name ?? "Shared document",
+      kind: "document",
+      created_at: "",
+      updated_at: "",
+    });
+    return;
+  }
+
+  setUpPresenceRoster();
   setUpAdmin();
+  setUpShare();
   setUpTreePolling();
 
   await refreshTree();
+}
+
+function setUpShare(): void {
+  if (!shareDialog) shareDialog = new ShareDialog({ announce });
+  document.querySelector<HTMLButtonElement>("#share-btn")!.addEventListener("click", () => {
+    if (currentDocument) void shareDialog?.open(currentDocument.id);
+    else announce("Open a document first to share it");
+  });
 }
 
 function hasOtherPeersInCurrentDoc(): boolean {
@@ -999,7 +1031,34 @@ window.addEventListener("keydown", (e) => {
   shortcutsHelpPanel?.open();
 });
 
+async function openSharedLink(token: string): Promise<void> {
+  // A signed-in member just opens the document; their own session is never replaced by a guest one.
+  try {
+    const member = await api.me();
+    if (!member.is_guest) {
+      const link = await api.getShareLink(token);
+      clearJoinHash();
+      currentUser = member;
+      await renderApp();
+      const node = fileTree?.getNode(link.doc_id);
+      if (node) void openDocument(node);
+      return;
+    }
+  } catch {
+    // not signed in, or link unknown to members: fall through to the guest join form
+  }
+  renderJoinForm(app, token, async (user) => {
+    currentUser = user;
+    await renderApp();
+  });
+}
+
 async function init(): Promise<void> {
+  const joinToken = joinTokenFromHash();
+  if (joinToken) {
+    await openSharedLink(joinToken);
+    return;
+  }
   try {
     currentUser = await api.me();
     await renderApp();

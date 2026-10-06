@@ -169,6 +169,14 @@ def refund_login_hit(request: Request) -> None:
         hits.pop()
 
 
+async def join_rate_limit(request: Request) -> None:
+    """Per-IP cap on guest joins (each join creates a user row)."""
+    limit = _env_int("COLLAB_EDITOR_JOIN_RATE_LIMIT", 20)
+    if not _enabled() or limit <= 0:
+        return
+    _check(("join", _client_ip(request)), limit)
+
+
 async def admin_rate_limit(
     request: Request,
     session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),

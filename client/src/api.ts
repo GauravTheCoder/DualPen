@@ -71,6 +71,10 @@ export interface CurrentUser {
   is_admin: boolean;
   is_active: boolean;
   created_at: string;
+  is_guest?: boolean;
+  guest_doc_id?: string | null;
+  guest_doc_name?: string | null;
+  guest_read_only?: boolean;
 }
 
 export function login(username: string, password: string): Promise<CurrentUser> {
@@ -247,4 +251,31 @@ export function adminUpdateUser(
   },
 ): Promise<CurrentUser> {
   return request(`/admin/users/${userId}`, { method: "PATCH", body: JSON.stringify(changes) });
+}
+
+export interface ShareLink {
+  token: string;
+  doc_id: string;
+  read_only: boolean;
+  created_at: string;
+}
+
+export function listShareLinks(docId: string): Promise<ShareLink[]> {
+  return request(`/documents/${docId}/share-links`);
+}
+
+export function createShareLink(docId: string, readOnly: boolean): Promise<ShareLink> {
+  return request(`/documents/${docId}/share-links`, { method: "POST", body: JSON.stringify({ read_only: readOnly }) });
+}
+
+export function revokeShareLink(docId: string, token: string): Promise<void> {
+  return request(`/documents/${docId}/share-links/${token}`, { method: "DELETE" });
+}
+
+export function getShareLink(token: string): Promise<ShareLink> {
+  return request(`/share/${token}`);
+}
+
+export function joinShare(token: string, displayName: string): Promise<CurrentUser> {
+  return request(`/share/${token}/join`, { method: "POST", body: JSON.stringify({ display_name: displayName }) });
 }

@@ -7,7 +7,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.app.db import get_db
-from server.app.models import GuestGrant, Session, ShareLink, User
+from server.app.models import GuestGrant, Node, Session, ShareLink, User
 
 SESSION_COOKIE_NAME = "session_token"
 SESSION_LIFETIME = datetime.timedelta(days=14)
@@ -36,14 +36,16 @@ def _cookie_secure() -> bool:
     return os.environ.get("COLLAB_EDITOR_COOKIE_SECURE", "true").strip().lower() not in ("0", "false", "no")
 
 
-def set_session_cookie(response: Response, session: Session) -> None:
+def set_session_cookie(
+    response: Response, session: Session, lifetime: datetime.timedelta = SESSION_LIFETIME
+) -> None:
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=session.token,
         httponly=True,
         secure=_cookie_secure(),
         samesite="lax",
-        max_age=int(SESSION_LIFETIME.total_seconds()),
+        max_age=int(lifetime.total_seconds()),
         path="/",
     )
 
@@ -106,6 +108,20 @@ async def get_guest_grant(db: AsyncSession, user: User) -> GuestGrant | None:
     return result.scalar_one_or_none()
 
 
+async def describe_user(db: AsyncSession, user: User):
+    """UserOut for `user`, with guest fields filled in when they are a guest."""
+    from server.app.schemas import UserOut
+
+    out = UserOut.model_validate(user)
+    grant = await get_guest_grant(db, user)
+    if grant is not None:
+        out.is_guest = True
+        out.guest_doc_id = grant.doc_id
+        out.guest_read_only = grant.read_only
+        out.guest_doc_name = (await db.execute(select(Node.name).where(Node.id == grant.doc_id))).scalar_one_or_none()
+    return out
+
+
 async def require_member(
     user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ) -> User:
@@ -114,8 +130,9 @@ async def require_member(
     return user
 
 
-async def delete_share_link(db: AsyncSession, token: str) -> None:
-    """Remove a link plus every guest it created (grants, sessions, user rows)."""
+async def delete_share_link(db: AsyncSession, token: str) -> list[int]:
+    """Remove a link plus every guest it created (grants, sessions, user rows).
+    Returns the removed guest user ids so callers can cut live connections."""
     guest_ids = select(GuestGrant.user_id).where(GuestGrant.link_id == token)
     await db.execute(delete(Session).where(Session.user_id.in_(guest_ids)))
     guest_users = (await db.execute(guest_ids)).scalars().all()
@@ -124,3 +141,4 @@ async def delete_share_link(db: AsyncSession, token: str) -> None:
         await db.execute(delete(User).where(User.id.in_(guest_users)))
     await db.execute(delete(ShareLink).where(ShareLink.token == token))
     await db.commit()
+    return list(guest_users)

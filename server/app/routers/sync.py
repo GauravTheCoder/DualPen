@@ -6,12 +6,12 @@ import weakref
 from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from pycrdt import Doc, Text, YMessageType, read_message
+from pycrdt import Doc, Text, YMessageType, YSyncMessageType, read_message
 from pycrdt.websocket import WebsocketServer
 from pycrdt.websocket.yroom import YRoom
 
 from server.app import chat_service, docstore, node_service, pubsub
-from server.app.auth import SESSION_COOKIE_NAME, get_user_for_session_token
+from server.app.auth import SESSION_COOKIE_NAME, get_guest_grant, get_user_for_session_token
 from server.app.db import AsyncSessionLocal
 from server.app.models import User
 
@@ -24,6 +24,7 @@ DEBOUNCE_SECONDS = 2.0
 MAX_FLUSH_INTERVAL_SECONDS = 15.0
 
 CLOSE_UNAUTHORIZED = 4401
+CLOSE_FORBIDDEN = 4403
 CLOSE_NOT_FOUND = 4404
 CLOSE_REPLACED_BY_NEWER_SESSION = 4409
 
@@ -114,10 +115,11 @@ class FastAPIChannel:
     client claims about its own identity.
     """
 
-    def __init__(self, websocket: WebSocket, doc_id: str, user: User, room: YRoom):
+    def __init__(self, websocket: WebSocket, doc_id: str, user: User, room: YRoom, read_only: bool = False):
         self._websocket = websocket
         self._doc_id = doc_id
         self._user = user
+        self._read_only = read_only
         self.room = room
 
     @property
@@ -135,6 +137,8 @@ class FastAPIChannel:
                 raise StopAsyncIteration()
             if message and message[0] == MESSAGE_TYPE_CHAT:
                 await self._handle_chat_frame(message)
+                continue
+            if self._read_only and _is_doc_write(message):
                 continue
             if message and message[0] == YMessageType.AWARENESS:
                 # YRoom.serve() fans this out to local clients itself; we only
@@ -195,6 +199,26 @@ class FastAPIChannel:
         # fan-out for awareness messages).
         await _send_to_local_clients(self.room, out_message)
         await broadcaster.publish(self._doc_id, pubsub.KIND_CHAT, out_message)
+
+
+def _is_doc_write(message: bytes) -> bool:
+    """Sync step2 / update frames carry document changes; step1 is only a read request."""
+    return (
+        len(message) > 1
+        and message[0] == YMessageType.SYNC
+        and message[1] in (YSyncMessageType.SYNC_STEP2, YSyncMessageType.SYNC_UPDATE)
+    )
+
+
+async def close_user_connections(user_ids: list[int]) -> None:
+    """Close live local sockets for these users (e.g. guests of a revoked link)."""
+    for user_id in user_ids:
+        entry = _user_open_doc.get(user_id)
+        if entry is not None:
+            try:
+                await entry[2].close(code=CLOSE_FORBIDDEN)
+            except Exception:
+                logger.warning("Failed to close connection for user %s", user_id)
 
 
 async def _send_to_local_clients(room: YRoom, message: bytes) -> None:
@@ -380,6 +404,12 @@ async def doc_sync(websocket: WebSocket, doc_id: str):
             await websocket.close(code=CLOSE_UNAUTHORIZED)
             return
 
+        grant = await get_guest_grant(db, user)
+        if grant is not None and grant.doc_id != doc_id:
+            await websocket.close(code=CLOSE_FORBIDDEN)
+            return
+        read_only = grant is not None and grant.read_only
+
         try:
             node = await node_service.get_document_node(db, doc_id)
         except node_service.NodeNotFoundError:
@@ -424,7 +454,7 @@ async def doc_sync(websocket: WebSocket, doc_id: str):
     # down: seed -> serve -> persist -> delete, in that order.
     try:
         room = await _seed_room_from_disk(doc_id, blob_path)
-        channel = FastAPIChannel(websocket, doc_id, user, room)
+        channel = FastAPIChannel(websocket, doc_id, user, room, read_only)
         await room.serve(channel)
     finally:
         # Only clear/own this user's entry if it still points at *this*
