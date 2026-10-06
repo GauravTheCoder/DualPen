@@ -99,8 +99,12 @@ Open the document, click **Share**, choose *Can edit* or *View only*, and create
   guests with no session left. Guests who sent chat messages are kept, since the messages reference them.
 - View-only guests can read and see live updates but not edit or chat. Every guest's cursor label is
   pinned by the server to their joined name.
-- Moving a shared document (or a folder containing one) into the Trash folder revokes its links.
-- Revoking disconnects guests on every process, including Redis multi-worker deployments.
+- Moving a shared document (or a folder containing one) into the Trash folder, or renaming a root folder to
+  the Trash name, revokes its links. The Trash folder name is `Trash` unless you set
+  `COLLAB_EDITOR_TRASH_FOLDER_NAME`; the app reads it from the server, so both always agree.
+- Revoking disconnects guests on every process, including Redis multi-worker deployments. If Redis is
+  down at that moment, every open connection re-checks its session every 30 seconds and closes itself
+  once the session is gone (this also ends connections of deactivated users and expired sessions).
 
 ## Deploying on your own server
 
@@ -363,6 +367,7 @@ All optional; set in the systemd unit's `Environment=` lines.
 | `COLLAB_EDITOR_ADMIN_RATE_LIMIT` | `120` | `/api/admin/*` requests per window, per signed-in user (unauthenticated requests use a separate per-IP bucket). |
 | `COLLAB_EDITOR_JOIN_RATE_LIMIT` | `20` | Guest joins per window per IP (429 beyond; `0` disables). |
 | `COLLAB_EDITOR_TRUST_FORWARDED_FOR` | `false` | Key rate limits on the last `X-Forwarded-For` entry. Set `true` only behind one trusted proxy that appends to it (the nginx config below does). Alternative to uvicorn `--proxy-headers`. |
+| `COLLAB_EDITOR_TRASH_FOLDER_NAME` | `Trash` | Name of the root folder treated as Trash (moving a shared document into it revokes its links). |
 | `COLLAB_EDITOR_RATE_LIMIT_WINDOW_SECONDS` | `60` | Rate-limit window. |
 | `COLLAB_EDITOR_RATE_LIMIT_ENABLED` | `true` | Master switch for rate limiting. |
 | `COLLAB_EDITOR_REDIS_URL` | unset | Enables multi-process realtime sync/presence/chat via Redis pub/sub. |

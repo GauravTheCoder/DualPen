@@ -45,7 +45,8 @@ import { ShortcutsHelpPanel } from "./shortcuts-help";
 import { AdminPanel } from "./admin";
 import { ShareDialog, clearJoinHash, joinTokenFromHash, renderJoinForm } from "./share";
 
-const TRASH_FOLDER_NAME = "Trash";
+// Set from /api/config on startup so the client and server agree on which folder is Trash.
+let trashFolderName = "Trash";
 // Idle threshold after the last keystroke before a peer's isTyping flips back
 // to false, matching the "clean boolean edge, not a raw timestamp" design so
 // peers don't each have to interpret staleness themselves.
@@ -340,7 +341,7 @@ async function renameNode(nodeId: string, newName: string): Promise<void> {
 async function deleteToTrash(node: NodeOut): Promise<void> {
   if (!fileTree) return;
 
-  const trash = fileTree.findRootFolderByName(TRASH_FOLDER_NAME);
+  const trash = fileTree.findRootFolderByName(trashFolderName);
   const inTrash = !!trash && fileTree.isDescendantOfNode(node.id, trash.id);
 
   if (inTrash) {
@@ -354,8 +355,8 @@ async function moveToTrash(node: NodeOut): Promise<void> {
   if (!fileTree) return;
 
   try {
-    const trash = fileTree.findRootFolderByName(TRASH_FOLDER_NAME);
-    const trashId = trash ? trash.id : (await api.createFolder(TRASH_FOLDER_NAME, null)).id;
+    const trash = fileTree.findRootFolderByName(trashFolderName);
+    const trashId = trash ? trash.id : (await api.createFolder(trashFolderName, null)).id;
 
     const pathPrefix = fileTree.getAncestorPath(node.id).join("-");
     const trashedName = pathPrefix ? `${pathPrefix}-${node.name}` : node.name;
@@ -442,7 +443,7 @@ function updateTreeToolbar(active: NodeOut | null, markedForMove: NodeOut | null
   if (!renameBtn || !moveBtn || !pasteBtn || !cancelBtn || !deleteBtn || !exportSelectedBtn || !statusEl) return;
 
   const moving = markedForMove !== null;
-  const trash = fileTree?.findRootFolderByName(TRASH_FOLDER_NAME) ?? null;
+  const trash = fileTree?.findRootFolderByName(trashFolderName) ?? null;
   const activeInTrash = !!active && !!trash && fileTree!.isDescendantOfNode(active.id, trash.id);
 
   renameBtn.disabled = !active || moving;
@@ -657,6 +658,11 @@ async function renderApp(): Promise<void> {
     return;
   }
 
+  try {
+    trashFolderName = (await api.getConfig()).trash_folder_name;
+  } catch {
+    // keep the default; the server still enforces its own name
+  }
   setUpPresenceRoster();
   setUpAdmin();
   setUpShare();

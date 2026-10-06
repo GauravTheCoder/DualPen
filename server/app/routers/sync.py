@@ -30,6 +30,10 @@ CLOSE_REPLACED_BY_NEWER_SESSION = 4409
 
 MESSAGE_TYPE_CHAT = 0x02
 
+# How often an open connection re-checks that its session (and user) is still valid.
+# This is the backstop for revoke/deactivate/expiry when the cross-process kick is lost.
+REVALIDATE_SECONDS = 30.0
+
 websocket_server = WebsocketServer()
 
 # In-memory no-op unless COLLAB_EDITOR_REDIS_URL is set; see pubsub.py. When
@@ -269,6 +273,23 @@ def _guest_awareness(message: bytes, user_id: int, name: str) -> bytes | None:
         return bytes([YMessageType.AWARENESS]) + _write_varuint(len(body)) + bytes(body)
     except (IndexError, ValueError):
         return None
+
+
+async def _revalidate_loop(websocket: WebSocket, session_token: str | None) -> None:
+    while True:
+        await asyncio.sleep(REVALIDATE_SECONDS)
+        try:
+            async with AsyncSessionLocal() as db:
+                valid = await get_user_for_session_token(db, session_token) is not None
+        except Exception:
+            logger.exception("Session re-check failed; will retry")
+            continue
+        if not valid:
+            try:
+                await websocket.close(code=CLOSE_FORBIDDEN)
+            except Exception:
+                logger.warning("Failed to close revoked connection")
+            return
 
 
 async def kick_users(user_ids: list[int]) -> None:
@@ -526,6 +547,7 @@ async def doc_sync(websocket: WebSocket, doc_id: str):
     # which would race our own disconnect-triggered flush below. Drive the
     # room directly instead so we control exactly when it's read and torn
     # down: seed -> serve -> persist -> delete, in that order.
+    revalidator = asyncio.ensure_future(_revalidate_loop(websocket, session_token))
     try:
         if not still_valid:
             await websocket.close(code=CLOSE_FORBIDDEN)
@@ -539,6 +561,7 @@ async def doc_sync(websocket: WebSocket, doc_id: str):
         # overwrote the entry (or, in principle, raced ahead of us), we must
         # not clobber it here - whichever connection is current owns cleanup
         # of its own entry.
+        revalidator.cancel()
         current = _user_open_doc.get(user.id)
         if current is not None and current[2] is websocket:
             del _user_open_doc[user.id]

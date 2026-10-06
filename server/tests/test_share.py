@@ -418,3 +418,47 @@ async def test_read_only_guest_chat_is_dropped_but_edit_guest_chat_works(live_se
         assert await got_chat("from-editor", e_ws)
         for ws in (m_ws, e_ws, v_ws):
             await ws.close()
+
+
+async def test_trash_folder_name_is_configurable_and_served(user_client, monkeypatch):
+    assert (await user_client.get("/api/config")).json() == {"trash_folder_name": "Trash"}
+    monkeypatch.setenv("COLLAB_EDITOR_TRASH_FOLDER_NAME", "Bin")
+    assert (await user_client.get("/api/config")).json() == {"trash_folder_name": "Bin"}
+
+    old = (await user_client.post("/api/folders", json={"name": "Trash", "parent_id": None})).json()
+    bin_ = (await user_client.post("/api/folders", json={"name": "Bin", "parent_id": None})).json()
+    doc_id = await _make_doc(user_client)
+    await _make_link(user_client, doc_id)
+    await user_client.patch(f"/api/nodes/{doc_id}", json={"parent_id": old["id"]})
+    assert len((await user_client.get(f"/api/documents/{doc_id}/share-links")).json()) == 1  # "Trash" is just a folder now
+    await user_client.patch(f"/api/nodes/{doc_id}", json={"parent_id": bin_["id"]})
+    assert (await user_client.get(f"/api/documents/{doc_id}/share-links")).json() == []
+
+
+async def test_renaming_a_folder_to_trash_revokes_links_inside(user_client):
+    folder = (await user_client.post("/api/folders", json={"name": "Old", "parent_id": None})).json()
+    doc = (await user_client.post("/api/documents", json={"name": "a.txt", "parent_id": folder["id"]})).json()
+    await _make_link(user_client, doc["id"])
+    await user_client.patch(f"/api/nodes/{folder['id']}", json={"name": "Trash"})
+    assert (await user_client.get(f"/api/documents/{doc['id']}/share-links")).json() == []
+
+
+async def test_lost_kick_is_caught_by_session_recheck(live_server, monkeypatch):
+    from server.app.routers import sync as sync_module
+
+    async def lost(user_ids):
+        pass
+
+    monkeypatch.setattr(sync_module, "close_user_connections", lost)
+    monkeypatch.setattr(sync_module, "REVALIDATE_SECONDS", 0.3)
+    async with _member() as member:
+        doc_id = await _make_doc(member)
+        link = await _make_link(member, doc_id)
+        cookie = await _join(link["token"])
+        ws, _doc, _text = await _connect(cookie, doc_id)
+        await member.delete(f"/api/documents/{doc_id}/share-links/{link['token']}")
+        with pytest.raises(websockets.ConnectionClosed) as exc:
+            async with asyncio.timeout(5):
+                while True:
+                    await ws.recv()
+        assert exc.value.rcvd.code == CLOSE_FORBIDDEN

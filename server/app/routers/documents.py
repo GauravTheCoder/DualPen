@@ -24,6 +24,11 @@ router = APIRouter(tags=["documents"], dependencies=[Depends(require_member)])
 chat_router = APIRouter(tags=["documents"])
 
 
+@router.get("/config")
+async def get_config():
+    return {"trash_folder_name": share_service.trash_folder_name()}
+
+
 @router.get("/tree", response_model=list[NodeOut])
 async def get_tree(db: AsyncSession = Depends(get_db)):
     return await node_service.list_tree(db)

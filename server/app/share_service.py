@@ -1,4 +1,5 @@
 import asyncio
+import os
 import datetime
 import logging
 
@@ -16,8 +17,11 @@ REAP_INTERVAL_SECONDS = 3600
 # Don't touch guests this young: join commits the user before its session exists.
 REAP_MIN_GUEST_AGE = datetime.timedelta(hours=1)
 
-# Same name the client uses for its auto-created root "Trash" folder.
-TRASH_FOLDER_NAME = "Trash"
+
+
+def trash_folder_name() -> str:
+    """Name of the root folder that counts as Trash (the client reads it from /api/config)."""
+    return os.environ.get("COLLAB_EDITOR_TRASH_FOLDER_NAME", "").strip() or "Trash"
 
 
 async def delete_share_link(db: AsyncSession, token: str) -> list[int]:
@@ -37,7 +41,9 @@ async def delete_share_link(db: AsyncSession, token: str) -> list[int]:
 async def end_sharing_if_trashed(db: AsyncSession, node: Node) -> None:
     """Revoke every link on the documents under `node` once it sits inside the Trash folder."""
     path = await node_service.get_ancestor_path(db, node)
-    if not path or path[0] != TRASH_FOLDER_NAME:
+    name = trash_folder_name()
+    # Either `node` sits under the Trash folder, or `node` is itself a root folder just named Trash.
+    if not (path[:1] == [name] or (not path and node.kind == "folder" and node.name == name)):
         return
     doc_ids: list[str] = []
     stack = [node]

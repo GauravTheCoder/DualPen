@@ -280,6 +280,10 @@ export function revokeShareLink(docId: string, token: string): Promise<void> {
   return request(`/documents/${docId}/share-links/${token}`, { method: "DELETE" });
 }
 
+export function getConfig(): Promise<{ trash_folder_name: string }> {
+  return request("/config");
+}
+
 export function getShareLink(token: string): Promise<ShareLink> {
   return request(`/share/${token}`);
 }
