@@ -257,6 +257,7 @@ export interface ShareLink {
   token: string;
   doc_id: string;
   read_only: boolean;
+  expires_at: string | null;
   created_at: string;
 }
 
@@ -264,8 +265,15 @@ export function listShareLinks(docId: string): Promise<ShareLink[]> {
   return request(`/documents/${docId}/share-links`);
 }
 
-export function createShareLink(docId: string, readOnly: boolean): Promise<ShareLink> {
-  return request(`/documents/${docId}/share-links`, { method: "POST", body: JSON.stringify({ read_only: readOnly }) });
+export function createShareLink(
+  docId: string,
+  readOnly: boolean,
+  expiresInHours: number | null,
+): Promise<ShareLink> {
+  return request(`/documents/${docId}/share-links`, {
+    method: "POST",
+    body: JSON.stringify({ read_only: readOnly, expires_in_hours: expiresInHours }),
+  });
 }
 
 export function revokeShareLink(docId: string, token: string): Promise<void> {

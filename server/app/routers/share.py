@@ -1,15 +1,15 @@
+import datetime
 import secrets
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.app import node_service
+from server.app import node_service, share_service
 from server.app.auth import (
     GUEST_SESSION_LIFETIME,
     SESSION_COOKIE_NAME,
     create_session,
-    delete_share_link,
     describe_user,
     get_guest_grant,
     get_user_for_session_token,
@@ -19,7 +19,7 @@ from server.app.auth import (
 from server.app.db import get_db
 from server.app.limits import join_rate_limit
 from server.app.models import GuestGrant, ShareLink, User
-from server.app.routers.sync import close_user_connections
+from server.app.routers.sync import kick_users
 from server.app.schemas import CreateShareLinkRequest, JoinRequest, ShareLinkOut, UserOut
 
 router = APIRouter(tags=["share"])
@@ -32,6 +32,19 @@ async def _get_doc_or_404(db: AsyncSession, doc_id: str):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 
 
+async def _get_live_link(db: AsyncSession, token: str) -> ShareLink:
+    result = await db.execute(select(ShareLink).where(ShareLink.token == token))
+    link = result.scalar_one_or_none()
+    if link is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Share link not found")
+    if link.expires_at is not None:
+        # SQLite stores naive datetimes; treat them as UTC.
+        expires_at = link.expires_at if link.expires_at.tzinfo else link.expires_at.replace(tzinfo=datetime.timezone.utc)
+        if expires_at < datetime.datetime.now(datetime.timezone.utc):
+            raise HTTPException(status_code=status.HTTP_410_GONE, detail="Share link has expired")
+    return link
+
+
 @router.post("/documents/{doc_id}/share-links", response_model=ShareLinkOut, status_code=status.HTTP_201_CREATED)
 async def create_share_link(
     doc_id: str,
@@ -40,7 +53,16 @@ async def create_share_link(
     db: AsyncSession = Depends(get_db),
 ):
     await _get_doc_or_404(db, doc_id)
-    link = ShareLink(token=secrets.token_urlsafe(24), doc_id=doc_id, read_only=payload.read_only, created_by=user.id)
+    expires_at = None
+    if payload.expires_in_hours is not None:
+        expires_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=payload.expires_in_hours)
+    link = ShareLink(
+        token=secrets.token_urlsafe(24),
+        doc_id=doc_id,
+        read_only=payload.read_only,
+        expires_at=expires_at,
+        created_by=user.id,
+    )
     db.add(link)
     await db.commit()
     await db.refresh(link)
@@ -61,18 +83,14 @@ async def revoke_share_link(
     result = await db.execute(select(ShareLink).where(ShareLink.token == token, ShareLink.doc_id == doc_id))
     if result.scalar_one_or_none() is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Share link not found")
-    guest_ids = await delete_share_link(db, token)
-    await close_user_connections(guest_ids)
+    guest_ids = await share_service.delete_share_link(db, token)
+    await kick_users(guest_ids)
 
 
 @router.get("/share/{token}", response_model=ShareLinkOut)
 async def get_share_link(token: str, _: User = Depends(require_member), db: AsyncSession = Depends(get_db)):
     """Lets a signed-in member resolve a link to its document instead of joining as a guest."""
-    result = await db.execute(select(ShareLink).where(ShareLink.token == token))
-    link = result.scalar_one_or_none()
-    if link is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Share link not found")
-    return link
+    return await _get_live_link(db, token)
 
 
 @router.post("/share/{token}/join", response_model=UserOut, dependencies=[Depends(join_rate_limit)])
@@ -87,10 +105,7 @@ async def join_share_link(
     current = await get_user_for_session_token(db, session_token)
     if current is not None and await get_guest_grant(db, current) is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Already signed in")
-    result = await db.execute(select(ShareLink).where(ShareLink.token == token))
-    link = result.scalar_one_or_none()
-    if link is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Share link not found")
+    link = await _get_live_link(db, token)
 
     # "!" is not a valid argon2 hash, so verify_password always fails: guests cannot password-login.
     guest = User(

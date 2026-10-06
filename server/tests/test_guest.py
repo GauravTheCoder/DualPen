@@ -4,7 +4,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
 
-from server.app import auth
+from server.app import auth, share_service
 from server.app.db import AsyncSessionLocal
 from server.app.models import GuestGrant, Node, Session, ShareLink, User
 from server.app.user_service import create_user
@@ -46,7 +46,7 @@ async def test_delete_link_cleans_guests(normal_user):
     async with AsyncSessionLocal() as db:
         _, guest = await _make_guest(db, normal_user)
         await auth.create_session(db, guest, auth.GUEST_SESSION_LIFETIME)
-        await auth.delete_share_link(db, "tok")
+        await share_service.delete_share_link(db, "tok")
         assert (await db.execute(select(ShareLink))).first() is None
         assert (await db.execute(select(Session))).first() is None
         # Guest row is kept (inactive) so its id is never reused for another user.

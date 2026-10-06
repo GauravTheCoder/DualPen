@@ -137,11 +137,14 @@ class ShareLinkOut(BaseModel):
     token: str
     doc_id: str
     read_only: bool
+    expires_at: datetime.datetime | None = None
     created_at: datetime.datetime
 
 
 class CreateShareLinkRequest(BaseModel):
     read_only: bool = False
+    # None = the link never expires. Expiry only stops new joins; existing guests keep their 24h session.
+    expires_in_hours: int | None = Field(default=None, ge=1, le=8760)
 
 
 class JoinRequest(BaseModel):

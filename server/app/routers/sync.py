@@ -94,6 +94,7 @@ async def get_all_open_docs_by_user() -> dict[int, tuple[str, str]]:
 async def sync_lifespan():
     broadcaster.set_resync_handler(_resync_doc)
     broadcaster.set_control_handler(_handle_user_opened_elsewhere)
+    broadcaster.set_kick_handler(close_user_connections)
     await broadcaster.start()
     try:
         async with websocket_server:
@@ -115,11 +116,12 @@ class FastAPIChannel:
     client claims about its own identity.
     """
 
-    def __init__(self, websocket: WebSocket, doc_id: str, user: User, room: YRoom, read_only: bool = False):
+    def __init__(self, websocket: WebSocket, doc_id: str, user: User, room: YRoom, read_only: bool = False, guest: bool = False):
         self._websocket = websocket
         self._doc_id = doc_id
         self._user = user
         self._read_only = read_only
+        self._guest = guest
         self.room = room
 
     @property
@@ -136,8 +138,14 @@ class FastAPIChannel:
             except WebSocketDisconnect:
                 raise StopAsyncIteration()
             if message and message[0] == MESSAGE_TYPE_CHAT:
-                await self._handle_chat_frame(message)
+                if not self._read_only:
+                    await self._handle_chat_frame(message)
                 continue
+            if self._guest and message and message[0] == YMessageType.AWARENESS:
+                # Awareness is client-controlled: pin a guest's identity to what the server knows.
+                message = _guest_awareness(message, self._user.id, self._user.display_name)
+                if message is None:
+                    continue
             if self._read_only and _is_doc_write(message):
                 continue
             if message and message[0] == YMessageType.AWARENESS:
@@ -208,6 +216,67 @@ def _is_doc_write(message: bytes) -> bool:
         and message[0] == YMessageType.SYNC
         and message[1] in (YSyncMessageType.SYNC_STEP2, YSyncMessageType.SYNC_UPDATE)
     )
+
+
+def _read_varuint(data: bytes, i: int) -> tuple[int, int]:
+    n = shift = 0
+    while True:
+        byte = data[i]
+        i += 1
+        n |= (byte & 0x7F) << shift
+        shift += 7
+        if byte < 0x80:
+            return n, i
+
+
+def _write_varuint(n: int) -> bytes:
+    out = bytearray()
+    while n > 0x7F:
+        out.append(0x80 | (n & 0x7F))
+        n >>= 7
+    out.append(n)
+    return bytes(out)
+
+
+MAX_GUEST_AWARENESS_BYTES = 4096
+
+
+def _guest_awareness(message: bytes, user_id: int, name: str) -> bytes | None:
+    """Rewrite an awareness frame so every state's `user` is the guest's server-known
+    identity. Returns None (drop the frame) if it is oversized or malformed."""
+    if len(message) > MAX_GUEST_AWARENESS_BYTES:
+        return None
+    try:
+        _length, i = _read_varuint(message, 1)
+        count, i = _read_varuint(message, i)
+        body = bytearray(_write_varuint(count))
+        for _ in range(count):
+            client_id, i = _read_varuint(message, i)
+            clock, i = _read_varuint(message, i)
+            size, i = _read_varuint(message, i)
+            raw = message[i : i + size]
+            if len(raw) != size:
+                return None
+            i += size
+            state = json.loads(raw.decode("utf-8"))
+            if isinstance(state, dict):
+                user = state.get("user")
+                state["user"] = {**(user if isinstance(user, dict) else {}), "id": user_id, "name": name}
+            elif state is not None:  # null = "client went away"
+                return None
+            out = json.dumps(state, separators=(",", ":")).encode("utf-8")
+            body += _write_varuint(client_id) + _write_varuint(clock) + _write_varuint(len(out)) + out
+        return bytes([YMessageType.AWARENESS]) + _write_varuint(len(body)) + bytes(body)
+    except (IndexError, ValueError):
+        return None
+
+
+async def kick_users(user_ids: list[int]) -> None:
+    """Close these users' live connections on every process."""
+    if not user_ids:
+        return
+    await close_user_connections(user_ids)
+    await broadcaster.publish_users_revoked(user_ids)
 
 
 async def close_user_connections(user_ids: list[int]) -> None:
@@ -462,7 +531,7 @@ async def doc_sync(websocket: WebSocket, doc_id: str):
             await websocket.close(code=CLOSE_FORBIDDEN)
             return
         room = await _seed_room_from_disk(doc_id, blob_path)
-        channel = FastAPIChannel(websocket, doc_id, user, room, read_only)
+        channel = FastAPIChannel(websocket, doc_id, user, room, read_only, grant is not None)
         await room.serve(channel)
     finally:
         # Only clear/own this user's entry if it still points at *this*

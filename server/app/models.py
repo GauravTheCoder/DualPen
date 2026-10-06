@@ -77,6 +77,7 @@ class ShareLink(Base):
     token: Mapped[str] = mapped_column(String(64), primary_key=True)
     doc_id: Mapped[str] = mapped_column(ForeignKey("nodes.id"), index=True)
     read_only: Mapped[bool] = mapped_column(Boolean, default=False)
+    expires_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc)

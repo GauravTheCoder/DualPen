@@ -89,15 +89,18 @@ Open the document, click **Share**, choose *Can edit* or *View only*, and create
 - A signed-in member opening a link just opens the document; their session is not replaced.
 - **Revoke** a link in the Share dialog: its guests are deactivated, their sessions end and live
   connections close.
-- Guest sessions last 24 hours. Links themselves do not expire; revoke them when done.
+- Guest sessions last 24 hours. Links never expire unless you choose an expiry when creating one
+  (1 hour, 1 day, 7 days); an expired link refuses new joins (410) but guests already in keep their
+  24-hour session. Revoke a link to cut them off immediately.
 - Link tokens are 24 random bytes, stored in plain text so the host can copy them again. Treat a link
-  like a password: anyone holding it can join. Joins are rate limited per IP.
+  like a password: anyone holding it can join. Joins are rate limited per IP (behind a reverse proxy,
+  run uvicorn with `--proxy-headers` so clients are not all counted as the proxy's address).
 - Guests are hidden from the Admin user list. Their user rows are kept (inactive after revoke)
   because chat messages reference them.
-- View-only guests can still chat and show their cursor; only document edits are blocked.
-- Moving a shared document to Trash does not end sharing; revoke its links first.
-- Revoking closes sockets on the local process only; with Redis multi-worker mode a guest connected
-  to another worker keeps the open socket until it reconnects (the reconnect is refused).
+- View-only guests can read and see live updates but not edit or chat. Every guest's cursor label is
+  pinned by the server to their joined name.
+- Moving a shared document (or a folder containing one) into the Trash folder revokes its links.
+- Revoking disconnects guests on every process, including Redis multi-worker deployments.
 
 ## Deploying on your own server
 

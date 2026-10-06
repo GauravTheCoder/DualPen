@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, 
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.app import chat_service, import_export_service, node_service
+from server.app import chat_service, import_export_service, node_service, share_service
 from server.app.auth import get_current_user, get_guest_grant, require_member
 from server.app.db import get_db
 from server.app.models import User
@@ -65,9 +65,11 @@ async def put_document_content(node_id: str, payload: DocumentContentIn, db: Asy
 @router.patch("/nodes/{node_id}", response_model=NodeOut)
 async def update_node(node_id: str, payload: UpdateNodeRequest, db: AsyncSession = Depends(get_db)):
     try:
-        return await node_service.update_node(
+        node = await node_service.update_node(
             db, node_id, payload.name, payload.parent_id, payload.clear_parent
         )
+        await share_service.end_sharing_if_trashed(db, node)
+        return node
     except node_service.NodeNotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except node_service.InvalidParentError as e:

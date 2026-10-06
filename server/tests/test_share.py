@@ -1,4 +1,6 @@
 import asyncio
+import datetime
+import json
 from contextlib import asynccontextmanager
 
 import httpx
@@ -6,11 +8,20 @@ import pytest
 import pytest_asyncio
 import uvicorn
 import websockets
+from sqlalchemy import select
 from pycrdt import Doc, Text, YMessageType, create_sync_message, create_update_message, handle_sync_message
 
 from server.app.db import AsyncSessionLocal
 from server.app.main import app
-from server.app.routers.sync import CLOSE_FORBIDDEN, TEXT_KEY
+from server.app.models import ShareLink
+from server.app.routers.sync import (
+    CLOSE_FORBIDDEN,
+    MESSAGE_TYPE_CHAT,
+    TEXT_KEY,
+    _guest_awareness,
+    _read_varuint,
+    _write_varuint,
+)
 from server.app.user_service import create_user
 
 SHARE_PORT = 8768
@@ -302,3 +313,108 @@ async def test_revoke_closes_live_guest_socket(live_server):
                 while True:
                     await ws.recv()
         assert exc.value.rcvd.code == CLOSE_FORBIDDEN
+
+
+# --- expiry, trash, awareness pinning, read-only chat, cross-process kick ---
+
+
+async def test_link_expiry(user_client):
+    doc_id = await _make_doc(user_client)
+    resp = await user_client.post(f"/api/documents/{doc_id}/share-links", json={"expires_in_hours": 0})
+    assert resp.status_code == 422
+    resp = await user_client.post(f"/api/documents/{doc_id}/share-links", json={"expires_in_hours": 2})
+    link = resp.json()
+    assert link["expires_at"] is not None
+    assert (await _make_link(user_client, doc_id))["expires_at"] is None
+
+    async with AsyncSessionLocal() as db:
+        row = (await db.execute(select(ShareLink).where(ShareLink.token == link["token"]))).scalar_one()
+        row.expires_at = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=1)
+        await db.commit()
+    assert (await user_client.get(f"/api/share/{link['token']}")).status_code == 410
+    async with _anon_client() as anon:
+        resp = await anon.post(f"/api/share/{link['token']}/join", json={"display_name": "late"})
+    assert resp.status_code == 410
+
+
+async def test_trashing_a_shared_doc_revokes_its_links(user_client):
+    trash = (await user_client.post("/api/folders", json={"name": "Trash", "parent_id": None})).json()
+    other = (await user_client.post("/api/folders", json={"name": "Archive", "parent_id": None})).json()
+    doc_id = await _make_doc(user_client)
+    link = await _make_link(user_client, doc_id)
+    async with _guest_client(link["token"]) as guest:
+        resp = await user_client.patch(f"/api/nodes/{doc_id}", json={"parent_id": other["id"]})
+        assert resp.status_code == 200
+        assert (await guest.get("/api/me")).status_code == 200  # a normal move keeps sharing
+
+        resp = await user_client.patch(f"/api/nodes/{doc_id}", json={"parent_id": trash["id"]})
+        assert resp.status_code == 200
+        assert (await guest.get("/api/me")).status_code == 401
+    assert (await user_client.get(f"/api/documents/{doc_id}/share-links")).json() == []
+
+
+async def test_trashing_a_folder_revokes_links_of_documents_inside(user_client):
+    trash = (await user_client.post("/api/folders", json={"name": "Trash", "parent_id": None})).json()
+    folder = (await user_client.post("/api/folders", json={"name": "Proj", "parent_id": None})).json()
+    doc = (await user_client.post("/api/documents", json={"name": "a.txt", "parent_id": folder["id"]})).json()
+    await _make_link(user_client, doc["id"])
+    await user_client.patch(f"/api/nodes/{folder['id']}", json={"parent_id": trash["id"]})
+    assert (await user_client.get(f"/api/documents/{doc['id']}/share-links")).json() == []
+
+
+def _awareness_frame(states: list[tuple[int, int, object]]) -> bytes:
+    body = _write_varuint(len(states))
+    for client_id, clock, state in states:
+        raw = json.dumps(state).encode()
+        body += _write_varuint(client_id) + _write_varuint(clock) + _write_varuint(len(raw)) + raw
+    return bytes([YMessageType.AWARENESS]) + _write_varuint(len(body)) + body
+
+
+def test_guest_awareness_identity_is_pinned():
+    spoofed = _awareness_frame([(7, 300, {"user": {"id": 1, "name": "Admin", "x": 1}, "cursor": {"line": 2}})])
+    out = _guest_awareness(spoofed, 42, "Gina")
+    _len, i = _read_varuint(out, 1)
+    count, i = _read_varuint(out, i)
+    client_id, i = _read_varuint(out, i)
+    clock, i = _read_varuint(out, i)
+    size, i = _read_varuint(out, i)
+    state = json.loads(out[i : i + size])
+    assert (count, client_id, clock) == (1, 7, 300)
+    assert state["user"] == {"id": 42, "name": "Gina", "x": 1}
+    assert state["cursor"] == {"line": 2}
+
+    # a state with no user still gets one; a null (disconnect) state is untouched
+    assert b'"name":"Gina"' in _guest_awareness(_awareness_frame([(1, 1, {})]), 42, "Gina")
+    assert b"null" in _guest_awareness(_awareness_frame([(1, 2, None)]), 42, "Gina")
+
+
+def test_guest_awareness_drops_bad_frames():
+    assert _guest_awareness(b"\x01\x05\x01", 1, "g") is None  # truncated
+    assert _guest_awareness(_awareness_frame([(1, 1, "str")]), 1, "g") is None
+    assert _guest_awareness(_awareness_frame([(1, 1, {"pad": "x" * 5000})]), 1, "g") is None
+
+
+async def test_read_only_guest_chat_is_dropped_but_edit_guest_chat_works(live_server):
+    async with _member() as member:
+        doc_id = await _make_doc(member)
+        edit_cookie = await _join((await _make_link(member, doc_id))["token"])
+        view_cookie = await _join((await _make_link(member, doc_id, read_only=True))["token"])
+        m_ws, _d, _t = await _connect(member.cookies["session_token"], doc_id)
+        e_ws, _d, _t = await _connect(edit_cookie, doc_id)
+        v_ws, _d, _t = await _connect(view_cookie, doc_id)
+
+        async def got_chat(body, sender) -> bool:
+            await sender.send(bytes([MESSAGE_TYPE_CHAT]) + json.dumps({"body": body}).encode())
+            try:
+                async with asyncio.timeout(1.5):
+                    while True:
+                        frame = await m_ws.recv()
+                        if frame[0] == MESSAGE_TYPE_CHAT and body in frame.decode("utf-8", "ignore"):
+                            return True
+            except TimeoutError:
+                return False
+
+        assert not await got_chat("from-viewer", v_ws)
+        assert await got_chat("from-editor", e_ws)
+        for ws in (m_ws, e_ws, v_ws):
+            await ws.close()

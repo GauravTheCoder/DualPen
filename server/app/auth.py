@@ -3,11 +3,11 @@ import os
 import secrets
 
 from fastapi import Cookie, Depends, HTTPException, Response, status
-from sqlalchemy import delete, select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.app.db import get_db
-from server.app.models import GuestGrant, Node, Session, ShareLink, User
+from server.app.models import GuestGrant, Node, Session, User
 
 SESSION_COOKIE_NAME = "session_token"
 SESSION_LIFETIME = datetime.timedelta(days=14)
@@ -128,17 +128,3 @@ async def require_member(
     if await get_guest_grant(db, user) is not None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Guests cannot access this resource")
     return user
-
-
-async def delete_share_link(db: AsyncSession, token: str) -> list[int]:
-    """Remove a link and cut off the guests it created: their sessions are deleted and
-    the users deactivated. User and grant rows are kept so ids are never reused (chat
-    messages reference them) and the guests stay hidden from the admin list.
-    Returns the guest user ids so callers can close live connections."""
-    guest_ids = list((await db.execute(select(GuestGrant.user_id).where(GuestGrant.link_id == token))).scalars())
-    if guest_ids:
-        await db.execute(delete(Session).where(Session.user_id.in_(guest_ids)))
-        await db.execute(update(User).where(User.id.in_(guest_ids)).values(is_active=False))
-    await db.execute(delete(ShareLink).where(ShareLink.token == token))
-    await db.commit()
-    return guest_ids

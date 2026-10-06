@@ -69,6 +69,13 @@ export class ShareDialog {
           <label><input type="radio" name="share-mode" value="edit" checked /> Can edit</label>
           <label><input type="radio" name="share-mode" value="view" /> View only</label>
         </fieldset>
+        <label for="share-expiry">Link expires</label>
+        <select id="share-expiry">
+          <option value="">Never</option>
+          <option value="1">After 1 hour</option>
+          <option value="24">After 1 day</option>
+          <option value="168">After 7 days</option>
+        </select>
         <button type="button" id="share-create-btn">Create link</button>
         <ul id="share-list" class="share-list" aria-label="Existing links"></ul>
         <p id="share-status" class="rename-dialog-error" role="status"></p>
@@ -102,7 +109,8 @@ export class ShareDialog {
     if (!this.docId) return;
     const mode = this.dialog.querySelector<HTMLInputElement>('input[name="share-mode"]:checked')!.value;
     try {
-      await api.createShareLink(this.docId, mode === "view");
+      const hours = this.dialog.querySelector<HTMLSelectElement>("#share-expiry")!.value;
+      await api.createShareLink(this.docId, mode === "view", hours ? Number(hours) : null);
       this.opts.announce("Share link created");
       await this.refresh();
     } catch (err) {
@@ -116,7 +124,7 @@ export class ShareDialog {
         const kind = link.read_only ? "View only" : "Can edit";
         const li = document.createElement("li");
         const label = document.createElement("span");
-        label.textContent = kind;
+        label.textContent = link.expires_at ? `${kind}, expires ${new Date(link.expires_at).toLocaleString()}` : kind;
         const input = document.createElement("input");
         input.readOnly = true;
         input.value = shareUrl(link.token);
