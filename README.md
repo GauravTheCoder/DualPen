@@ -22,6 +22,8 @@ screen-reader-accessible, so blind and sighted collaborators can edit documents 
   the authoritative list.
 - Per-user accessibility mode (on by default for new users), editor font/size, and
   presence-sound mute/volume settings, all in one Settings dialog.
+- Guest share links: a member creates an edit or view-only link for a document (Share button); anyone
+  with the link joins by entering a name, no account needed. See [Guest share links](#guest-share-links).
 - Zip import and export, so you can easily migrate documents to or from DualPen
 - Server-wide AES-256-GCM encryption at rest for document content, argon2id-hashed
   passwords, and admin-managed accounts (no self-signup) with list/create/update
@@ -75,6 +77,27 @@ automatically; no configuration needed for local dev.
 
 Run the test suite with `python -m pytest` from `server/` (or `server/tests/` — see
 `server/pytest.ini`).
+
+## Guest share links
+
+Open the document, click **Share**, choose *Can edit* or *View only*, and create a link
+(`https://your-host/#join=<token>`). Anyone who opens it enters a display name and joins as a guest.
+
+- A guest sees only that one document and its chat. No file tree, roster, import/export or admin;
+  the server refuses every other API route and any other document's WebSocket (403 / close 4403).
+- View-only guests receive live updates; their edits are dropped by the server.
+- A signed-in member opening a link just opens the document; their session is not replaced.
+- **Revoke** a link in the Share dialog: its guests are deactivated, their sessions end and live
+  connections close.
+- Guest sessions last 24 hours. Links themselves do not expire; revoke them when done.
+- Link tokens are 24 random bytes, stored in plain text so the host can copy them again. Treat a link
+  like a password: anyone holding it can join. Joins are rate limited per IP.
+- Guests are hidden from the Admin user list. Their user rows are kept (inactive after revoke)
+  because chat messages reference them.
+- View-only guests can still chat and show their cursor; only document edits are blocked.
+- Moving a shared document to Trash does not end sharing; revoke its links first.
+- Revoking closes sockets on the local process only; with Redis multi-worker mode a guest connected
+  to another worker keeps the open socket until it reconnects (the reconnect is refused).
 
 ## Deploying on your own server
 
@@ -335,6 +358,7 @@ All optional; set in the systemd unit's `Environment=` lines.
 | `COLLAB_EDITOR_IMPORT_MAX_UNCOMPRESSED_BYTES` | `52428800` | Max total uncompressed import size. |
 | `COLLAB_EDITOR_LOGIN_RATE_LIMIT` | `10` | Failed logins per window per IP (429 beyond; `0` disables). Successful logins aren't counted. |
 | `COLLAB_EDITOR_ADMIN_RATE_LIMIT` | `120` | `/api/admin/*` requests per window, per signed-in user (unauthenticated requests use a separate per-IP bucket). |
+| `COLLAB_EDITOR_JOIN_RATE_LIMIT` | `20` | Guest joins per window per IP (429 beyond; `0` disables). |
 | `COLLAB_EDITOR_RATE_LIMIT_WINDOW_SECONDS` | `60` | Rate-limit window. |
 | `COLLAB_EDITOR_RATE_LIMIT_ENABLED` | `true` | Master switch for rate limiting. |
 | `COLLAB_EDITOR_REDIS_URL` | unset | Enables multi-process realtime sync/presence/chat via Redis pub/sub. |

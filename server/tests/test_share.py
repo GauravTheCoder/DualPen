@@ -29,6 +29,12 @@ async def _make_link(client, doc_id, read_only=False) -> dict:
 
 
 @asynccontextmanager
+async def _anon_client():
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as c:
+        yield c
+
+
+@asynccontextmanager
 async def _guest_client(token, name="Guest"):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as guest:
         resp = await guest.post(f"/api/share/{token}/join", json={"display_name": name})
@@ -90,17 +96,38 @@ async def test_join_bad_token_and_bad_name(client):
 async def test_join_validates_display_name(user_client):
     doc_id = await _make_doc(user_client)
     token = (await _make_link(user_client, doc_id))["token"]
-    for bad in ("", "   ", "x" * 65):
-        resp = await user_client.post(f"/api/share/{token}/join", json={"display_name": bad})
-        assert resp.status_code == 422
+    async with _anon_client() as anon:
+        for bad in ("", "   ", "x" * 65):
+            resp = await anon.post(f"/api/share/{token}/join", json={"display_name": bad})
+            assert resp.status_code == 422
 
 
 async def test_join_rate_limited(user_client, monkeypatch):
     monkeypatch.setenv("COLLAB_EDITOR_JOIN_RATE_LIMIT", "2")
     doc_id = await _make_doc(user_client)
     token = (await _make_link(user_client, doc_id))["token"]
-    codes = [(await user_client.post(f"/api/share/{token}/join", json={"display_name": "g"})).status_code for _ in range(3)]
+    async with _anon_client() as anon:
+        codes = [(await anon.post(f"/api/share/{token}/join", json={"display_name": "g"})).status_code for _ in range(3)]
     assert codes == [200, 200, 429]
+
+
+async def test_join_refused_for_signed_in_member(user_client):
+    doc_id = await _make_doc(user_client)
+    token = (await _make_link(user_client, doc_id))["token"]
+    resp = await user_client.post(f"/api/share/{token}/join", json={"display_name": "g"})
+    assert resp.status_code == 409
+    assert (await user_client.get("/api/me")).status_code == 200
+
+
+async def test_revoked_guest_id_is_not_reused(user_client):
+    doc_id = await _make_doc(user_client)
+    link = await _make_link(user_client, doc_id)
+    async with _guest_client(link["token"]) as guest:
+        guest_id = (await guest.get("/api/me")).json()["id"]
+    await user_client.delete(f"/api/documents/{doc_id}/share-links/{link['token']}")
+    async with AsyncSessionLocal() as db:
+        new_user = await create_user(db, "bob", "Bob", "bobpass123")
+    assert new_user.id != guest_id
 
 
 async def test_revoked_link_cannot_join_and_guest_session_dies(user_client):
@@ -110,7 +137,8 @@ async def test_revoked_link_cannot_join_and_guest_session_dies(user_client):
         assert (await guest.get("/api/me")).status_code == 200
         await user_client.delete(f"/api/documents/{doc_id}/share-links/{link['token']}")
         assert (await guest.get("/api/me")).status_code == 401
-    resp = await user_client.post(f"/api/share/{link['token']}/join", json={"display_name": "late"})
+    async with _anon_client() as anon:
+        resp = await anon.post(f"/api/share/{link['token']}/join", json={"display_name": "late"})
     assert resp.status_code == 404
 
 

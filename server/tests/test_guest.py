@@ -47,7 +47,9 @@ async def test_delete_link_cleans_guests(normal_user):
         _, guest = await _make_guest(db, normal_user)
         await auth.create_session(db, guest, auth.GUEST_SESSION_LIFETIME)
         await auth.delete_share_link(db, "tok")
-        for model in (ShareLink, GuestGrant, Session):
-            assert (await db.execute(select(model))).first() is None
-        assert (await db.execute(select(User).where(User.id == guest.id))).first() is None
+        assert (await db.execute(select(ShareLink))).first() is None
+        assert (await db.execute(select(Session))).first() is None
+        # Guest row is kept (inactive) so its id is never reused for another user.
+        await db.refresh(guest)
+        assert guest.is_active is False
         assert (await db.execute(select(User).where(User.id == normal_user.id))).first() is not None

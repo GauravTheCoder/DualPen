@@ -447,12 +447,20 @@ async def doc_sync(websocket: WebSocket, doc_id: str):
 
     room = None
 
+    # A revoke can land between the auth check above and registering in
+    # _user_open_doc (close_user_connections would then miss us): re-check.
+    async with AsyncSessionLocal() as db:
+        still_valid = await get_user_for_session_token(db, session_token) is not None
+
     # WebsocketServer.serve() auto-deletes the room from its registry the
     # instant the last client disconnects (before returning control to us),
     # which would race our own disconnect-triggered flush below. Drive the
     # room directly instead so we control exactly when it's read and torn
     # down: seed -> serve -> persist -> delete, in that order.
     try:
+        if not still_valid:
+            await websocket.close(code=CLOSE_FORBIDDEN)
+            return
         room = await _seed_room_from_disk(doc_id, blob_path)
         channel = FastAPIChannel(websocket, doc_id, user, room, read_only)
         await room.serve(channel)

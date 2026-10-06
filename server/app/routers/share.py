@@ -1,15 +1,18 @@
 import secrets
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.app import node_service
 from server.app.auth import (
     GUEST_SESSION_LIFETIME,
+    SESSION_COOKIE_NAME,
     create_session,
     delete_share_link,
     describe_user,
+    get_guest_grant,
+    get_user_for_session_token,
     require_member,
     set_session_cookie,
 )
@@ -74,8 +77,16 @@ async def get_share_link(token: str, _: User = Depends(require_member), db: Asyn
 
 @router.post("/share/{token}/join", response_model=UserOut, dependencies=[Depends(join_rate_limit)])
 async def join_share_link(
-    token: str, payload: JoinRequest, response: Response, db: AsyncSession = Depends(get_db)
+    token: str,
+    payload: JoinRequest,
+    response: Response,
+    session_token: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    db: AsyncSession = Depends(get_db),
 ):
+    # Never replace a signed-in member's session with a guest one.
+    current = await get_user_for_session_token(db, session_token)
+    if current is not None and await get_guest_grant(db, current) is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Already signed in")
     result = await db.execute(select(ShareLink).where(ShareLink.token == token))
     link = result.scalar_one_or_none()
     if link is None:

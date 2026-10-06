@@ -3,7 +3,7 @@ import os
 import secrets
 
 from fastapi import Cookie, Depends, HTTPException, Response, status
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.app.db import get_db
@@ -131,14 +131,14 @@ async def require_member(
 
 
 async def delete_share_link(db: AsyncSession, token: str) -> list[int]:
-    """Remove a link plus every guest it created (grants, sessions, user rows).
-    Returns the removed guest user ids so callers can cut live connections."""
-    guest_ids = select(GuestGrant.user_id).where(GuestGrant.link_id == token)
-    await db.execute(delete(Session).where(Session.user_id.in_(guest_ids)))
-    guest_users = (await db.execute(guest_ids)).scalars().all()
-    await db.execute(delete(GuestGrant).where(GuestGrant.link_id == token))
-    if guest_users:
-        await db.execute(delete(User).where(User.id.in_(guest_users)))
+    """Remove a link and cut off the guests it created: their sessions are deleted and
+    the users deactivated. User and grant rows are kept so ids are never reused (chat
+    messages reference them) and the guests stay hidden from the admin list.
+    Returns the guest user ids so callers can close live connections."""
+    guest_ids = list((await db.execute(select(GuestGrant.user_id).where(GuestGrant.link_id == token))).scalars())
+    if guest_ids:
+        await db.execute(delete(Session).where(Session.user_id.in_(guest_ids)))
+        await db.execute(update(User).where(User.id.in_(guest_ids)).values(is_active=False))
     await db.execute(delete(ShareLink).where(ShareLink.token == token))
     await db.commit()
-    return list(guest_users)
+    return guest_ids
