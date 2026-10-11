@@ -13,6 +13,7 @@ const SHORTCUT_GROUPS: { title: string; items: [string, string][] }[] = [
       ["Ctrl+H", "Find and replace in current document"],
       ["F3 / Shift+F3", "Next / previous match"],
       [`${ALT}+R`, "Open markdown preview of current document in a new tab"],
+      [`${ALT}+O`, "Outline of headings in current document"],
       [`${ALT}+W`, "Announce who's online"],
       ["Ctrl+M", "Toggle Tab moves focus vs. inserts tab (editor)"],
       [`F1 / ${ALT}+F1`, "Show this help"],

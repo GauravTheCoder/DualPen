@@ -13,6 +13,7 @@ screen-reader-accessible, so blind and sighted collaborators can edit documents 
 - Persistent per-document chat: `F2` for a quick single-line composer, `Shift+F2` for the
   full panel, plus a paginated REST history endpoint. Server stores the chat history.
 - A "who's online" roster (`Alt+W` or the toolbar button) showing everyone connected app-wide and what document they're editing
+- Outline View (`Alt+O` or the Outline toolbar button) — a tree of the current document's headings; Enter or click jumps the cursor to that heading
 - Markdown preview (`Alt+R`) — renders the current document's source as sanitized HTML in
   a modal.
 - A file tree with full keyboard navigation and standard shortcuts. Move, rename and delete files and folders. Deleting moves an item

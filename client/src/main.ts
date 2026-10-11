@@ -42,6 +42,7 @@ import { MarkdownPreviewPanel } from "./markdown-preview";
 import { attachDocCollaboratorsList, type DocCollaboratorsList } from "./doc-collaborators";
 import { PresenceRosterPanel } from "./presence-roster";
 import { ShortcutsHelpPanel } from "./shortcuts-help";
+import { OutlineViewPanel } from "./outline-view";
 import { AdminPanel } from "./admin";
 
 const TRASH_FOLDER_NAME = "Trash";
@@ -81,6 +82,7 @@ let settingsPanel: SettingsPanel | null = null;
 let markdownPreviewPanel: MarkdownPreviewPanel | null = null;
 let presenceRosterPanel: PresenceRosterPanel | null = null;
 let shortcutsHelpPanel: ShortcutsHelpPanel | null = null;
+let outlineViewPanel: OutlineViewPanel | null = null;
 let adminPanel: AdminPanel | null = null;
 let treeRefreshTimer: number | null = null;
 // Tracks whether #move-status's live-region text was last set for "moving"
@@ -527,6 +529,7 @@ async function renderApp(): Promise<void> {
             <span id="editor-title">No document open</span>
             <span id="tab-focus-indicator" role="status">Tab moves focus: OFF</span>
             <span id="doc-collaborators" role="status"></span>
+            <button id="outline-btn" type="button">Outline</button>
             <button id="settings-btn" type="button">Settings</button>
             ${currentUser?.is_admin ? '<button id="admin-btn" type="button">Admin</button>' : ""}
             <span id="save-status" role="status"></span>
@@ -635,6 +638,7 @@ async function renderApp(): Promise<void> {
   setUpMarkdownPreview();
   setUpPresenceRoster();
   setUpShortcutsHelp();
+  setUpOutlineView();
   setUpAdmin();
   setUpTreePolling();
 
@@ -721,17 +725,37 @@ function setUpMonaco(): void {
     focusTreePane();
   });
 
-  // Monaco's find feature binds Alt+R (toggle regex in the find widget) once
-  // imported, which swallows our window-level Alt+R markdown-preview shortcut
-  // whenever the editor has focus. Re-bind it here so it works from the
-  // editor too - same reasoning as F6 above.
-  monacoEditor.addCommand(monaco.KeyMod.Alt | monaco.KeyCode.KeyR, () => {
-    if (!currentModel || !currentDocument) return;
-    markdownPreviewPanel?.open(currentModel.getValue(), currentDocument.name);
-  });
-
+  restrictFindToggleKeybindings();
   bindCtrlArrowWordNavigation(monacoEditor);
   bindVerticalArrowTracking(monacoEditor);
+}
+
+// Monaco's find feature binds Alt+C/W/R/L/P (Cmd+Alt+... on macOS) to toggle
+// its search options whenever the editor has focus, which swallows our
+// window-level Alt+W/Alt+R shortcuts and silently flips find settings while
+// typing. Re-scope them to only fire while focus is inside the find widget.
+// Keybinding rules are global to Monaco, so this only needs to run once.
+let findTogglesRestricted = false;
+function restrictFindToggleKeybindings(): void {
+  if (findTogglesRestricted) return;
+  findTogglesRestricted = true;
+
+  const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
+  const modifiers = isMac ? monaco.KeyMod.CtrlCmd | monaco.KeyMod.Alt : monaco.KeyMod.Alt;
+  const toggles: [string, monaco.KeyCode][] = [
+    ["toggleFindCaseSensitive", monaco.KeyCode.KeyC],
+    ["toggleFindWholeWord", monaco.KeyCode.KeyW],
+    ["toggleFindRegex", monaco.KeyCode.KeyR],
+    ["toggleFindInSelection", monaco.KeyCode.KeyL],
+    ["togglePreserveCase", monaco.KeyCode.KeyP],
+  ];
+  monaco.editor.addKeybindingRules(
+    toggles.flatMap(([command, keyCode]) => [
+      // keybinding 0 removes every default binding for the command.
+      { keybinding: 0, command: `-${command}` },
+      { keybinding: modifiers | keyCode, command, when: "findWidgetFocused" },
+    ]),
+  );
 }
 
 // Monaco's default Ctrl+Left/Right keybinding for cursorWordEndLeft/Right
@@ -884,6 +908,27 @@ function setUpShortcutsHelp(): void {
   }
 }
 
+function setUpOutlineView(): void {
+  // Same guarded-singleton reasoning as the other panels above.
+  if (!outlineViewPanel) {
+    outlineViewPanel = new OutlineViewPanel({
+      getModel: () => currentModel,
+      onJump: (lineNumber) => {
+        if (!monacoEditor) return;
+        monacoEditor.setPosition({ lineNumber, column: 1 });
+        monacoEditor.revealLineInCenter(lineNumber);
+        monacoEditor.focus();
+        announce(`Line ${lineNumber}`);
+      },
+      announce,
+    });
+  }
+
+  document.querySelector<HTMLButtonElement>("#outline-btn")!.addEventListener("click", () => {
+    outlineViewPanel?.open();
+  });
+}
+
 function focusEditorPane(): void {
   monacoEditor?.focus();
 }
@@ -989,6 +1034,15 @@ window.addEventListener("keydown", (e) => {
 
   e.preventDefault();
   void presenceRosterPanel?.openOrAnnounceIfEmpty();
+});
+
+// Alt+O: outline of the current document's headings. preventDefault comes
+// first so Option+O on macOS doesn't type "ø" into the editor.
+window.addEventListener("keydown", (e) => {
+  if (!isAltLetter(e, "o")) return;
+
+  e.preventDefault();
+  outlineViewPanel?.open();
 });
 
 // F1 (or Alt+F1 as a fallback, since some browsers/OSes intercept bare F1
