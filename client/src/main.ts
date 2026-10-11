@@ -917,21 +917,28 @@ window.addEventListener("keydown", (e) => {
   }
 });
 
+// On macOS, Option+letter composes a character (Option+W -> "∑"), so e.key
+// no longer names the letter. Fall back to the physical key code.
+function isAltLetter(e: KeyboardEvent, letter: string): boolean {
+  if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return false;
+  return e.key.toLowerCase() === letter || e.code === `Key${letter.toUpperCase()}`;
+}
+
 // Registered once at module scope, like the F6 handler above, so it works
 // regardless of which pane currently has focus (though it's only meaningful
 // while a document with an active sync connection is open).
 window.addEventListener("keydown", (e) => {
-  if (e.key !== "j" && e.key !== "J") return;
-  if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+  if (!isAltLetter(e, "j")) return;
   if (!monacoEditor || !currentSync || !collaboratorCycler) return;
 
+  // Before the no-peer early return, so Option+J on macOS doesn't type "∆".
+  e.preventDefault();
   const peer = collaboratorCycler.next(currentSync.awareness);
   if (!peer) {
     announce("No one else is editing this document.");
     return;
   }
 
-  e.preventDefault();
   const position = { lineNumber: peer.lineNumber, column: peer.column };
   monacoEditor.setPosition(position);
   monacoEditor.revealPositionInCenter(position);
@@ -965,8 +972,7 @@ window.addEventListener("keydown", (e) => {
 // Alt+R: markdown preview of the current document. Registered once at
 // module scope like the other global shortcuts above.
 window.addEventListener("keydown", (e) => {
-  if (e.key !== "r" && e.key !== "R") return;
-  if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+  if (!isAltLetter(e, "r")) return;
   if (!currentModel || !currentDocument) return;
 
   e.preventDefault();
@@ -979,8 +985,7 @@ window.addEventListener("keydown", (e) => {
 // panel instead of just reading a summary aloud. Registered once at module
 // scope like the others.
 window.addEventListener("keydown", (e) => {
-  if (e.key !== "w" && e.key !== "W") return;
-  if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+  if (!isAltLetter(e, "w")) return;
 
   e.preventDefault();
   void presenceRosterPanel?.openOrAnnounceIfEmpty();
